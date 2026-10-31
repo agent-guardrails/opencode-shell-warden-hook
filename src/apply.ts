@@ -1,8 +1,13 @@
-// Verdict application — docs/policyd-plugin-design/03-shim.md §3.2
-// Tighten-only mapping of engine outcomes onto the evaluate event (invariant I5).
+// Verdict application — docs/policyd-plugin-design/03-shim.md §3.2 (revised v1.1)
+// The engine is the policy authority: its verdict REPLACES the accumulated
+// effect (it may automate an ask into an allow — that is the product).
+// The only protection: never loosen an existing deny (future coexistence with
+// other hook plugins; explicit config denies never reach hooks at all).
 
 import { createHash } from "node:crypto"
 import type { CheckParams, CheckResult, PermissionEvaluation, Verdict } from "./types.ts"
+
+const RANK: Record<Verdict, number> = { allow: 0, ask: 1, deny: 2 }
 
 export type CheckOutcome = { ok: true; result: CheckResult } | { ok: false; reason: string }
 
@@ -50,13 +55,14 @@ export function buildCheckRequest(args: {
 }
 
 /**
- * Tighten-only: writes the verdict only when its rank is strictly higher than
- * the current effect (never loosens). Message is attached only on tighten.
+ * Applies the engine verdict to the evaluate event.
+ * - An existing `deny` is never loosened (only its message may be refined).
+ * - `message` is attached whenever provided (append/replace composition is the
+ *   engine's job in v1.1; the shim just carries the final string).
  * Returns true when the event was changed.
  */
-export function tighten(ev: PermissionEvaluation, verdict: Verdict, message?: string): boolean {
-  const RANK: Record<Verdict, number> = { allow: 0, ask: 1, deny: 2 }
-  if (RANK[verdict] <= RANK[ev.effect]) return false
+export function applyToEvent(ev: PermissionEvaluation, verdict: Verdict, message?: string): boolean {
+  if (ev.effect === "deny" && verdict !== "deny") return false
   ev.effect = verdict
   if (message !== undefined) ev.message = message
   return true

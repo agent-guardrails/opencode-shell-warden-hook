@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { buildCheckRequest, cacheKey, InvocationRegistry, invocationIdOf, tighten } from "../src/apply.ts"
+import { buildCheckRequest, cacheKey, InvocationRegistry, invocationIdOf, applyToEvent } from "../src/apply.ts"
 import type { PermissionEvaluation } from "../src/types.ts"
 
 const ev = (over: Partial<PermissionEvaluation> = {}): PermissionEvaluation => ({
@@ -37,21 +37,33 @@ test("buildCheckRequest maps the evaluate event", () => {
   ])
 })
 
-test("tighten never loosens (invariant I5)", () => {
+test("applyToEvent never loosens (invariant I5)", () => {
   const e = ev({ effect: "deny" })
-  assert.equal(tighten(e, "allow", "nope"), false)
+  assert.equal(applyToEvent(e, "allow", "nope"), false)
   assert.equal(e.effect, "deny")
   assert.equal(e.message, undefined)
 })
 
-test("tighten escalates and attaches message only on tighten", () => {
-  const e = ev({ effect: "allow" })
-  assert.equal(tighten(e, "allow", "same rank"), false)
-  assert.equal(tighten(e, "ask", "engine says ask"), true)
-  assert.equal(e.effect, "ask")
-  assert.equal(e.message, "engine says ask")
-  assert.equal(tighten(e, "deny"), true)
+test("applyToEvent: engine verdict replaces the accumulated effect (v1.1)", () => {
+  // The engine is the policy authority: it may automate an ask into an allow.
+  const e = ev({ effect: "ask" })
+  assert.equal(applyToEvent(e, "allow", "engine allows"), true)
+  assert.equal(e.effect, "allow")
+  assert.equal(e.message, "engine allows")
+  // …and tighten back up if the engine asks/denies later
+  assert.equal(applyToEvent(e, "deny", "engine denies"), true)
   assert.equal(e.effect, "deny")
+})
+
+test("applyToEvent: never loosens an existing deny (v1.1 guard)", () => {
+  const e = ev({ effect: "deny" })
+  assert.equal(applyToEvent(e, "allow", "nope"), false)
+  assert.equal(applyToEvent(e, "ask", "nope"), false)
+  assert.equal(e.effect, "deny")
+  // same verdict → no change
+  assert.equal(applyToEvent(e, "deny", "refined reason"), true)
+  assert.equal(e.effect, "deny")
+  assert.equal(e.message, "refined reason")
 })
 
 test("InvocationRegistry remembers and evicts oldest", () => {
