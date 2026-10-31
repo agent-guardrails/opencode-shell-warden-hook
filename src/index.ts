@@ -4,7 +4,6 @@
 // onEngineError ("ask" | "deny"), never "allow".
 
 import { Plugin } from "@opencode/plugin"
-import { appendFileSync } from "node:fs"
 import { applyToEvent, buildCheckRequest, cacheKey, invocationIdOf, InvocationRegistry } from "./apply.ts"
 import { VerdictCache } from "./cache.ts"
 import { validateOptions } from "./config.ts"
@@ -12,11 +11,6 @@ import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts"
 
 const VERSION = "0.1.0"
 const PLUGIN_ID = "opencode-shell-warden-hook"
-const PROBE = "/private/var/folders/mk/17k6nth16r7gzxbxs3b7jlrw0000gn/T/opencode/smoke/probe.log"
-const probe = (msg: string): void => {
-  try { appendFileSync(PROBE, `${new Date().toISOString()} ${msg}\n`) } catch { /* ignore */ }
-}
-
 export default Plugin.define({
   id: PLUGIN_ID,
   async setup(ctx) {
