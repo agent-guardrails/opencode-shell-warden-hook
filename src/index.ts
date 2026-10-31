@@ -1,16 +1,20 @@
 // opencode-shell-warden-hook — OpenCode V2 plugin entry.
-// Registers the permission evaluate hook and forwards verdicts from the
-// shell-warden engine. Fail-closed: every transport anomaly degrades to
-// onEngineError ("ask" | "deny"), never "allow".
+// Mechanism per ADR-0013: the native substrate is the fail-closed boundary
+// (permissions: shell → ask). The shim listens for published permission
+// requests, consults the shell-warden engine, and replies programmatically:
+// allow → "once", deny → "reject" (with reason), ask → silence (human decides).
+// Fail-closed: with the hook absent every ask reaches the human / headless
+// auto-reject — nothing executes silently.
 
 import { Plugin } from "@opencode/plugin"
-import { applyToEvent, buildCheckRequest, cacheKey, invocationIdOf, InvocationRegistry } from "./apply.ts"
+import { replyDecision, buildCheckRequest, cacheKey, invocationIdOf, InvocationRegistry } from "./apply.ts"
 import { VerdictCache } from "./cache.ts"
 import { validateOptions } from "./config.ts"
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts"
 
 const VERSION = "0.1.0"
 const PLUGIN_ID = "opencode-shell-warden-hook"
+
 export default Plugin.define({
   id: PLUGIN_ID,
   async setup(ctx) {
@@ -51,66 +55,82 @@ export default Plugin.define({
     const cache = new VerdictCache(cfg.cache.enabled ? cfg.cache.maxEntries : 0)
     const registry = new InvocationRegistry()
 
-    const resolveCwd = async (sessionID: string): Promise<string> => {
-      // v0.1: НЕ вызываем ctx.session.get изнутри evaluate-хука — рекурсивный
-      // HTTP-запрос в сервер во время оценки permissions дедлочит (обсуждено в смоуке).
-      // TODO(M1): резолвить cwd через подписку на session-события (вне hot path).
-      return ""
-    }
+    const myLocation = ctx.location?.directory ?? ""
+    const reply = (sessionID: string, requestID: string, decision: "once" | "reject", message?: string) =>
+      (ctx as any).permission.reply({
+        sessionID,
+        requestID,
+        decision,
+        ...(message !== undefined ? { message } : {}),
+      })
 
-    const isWatched = (action: string): boolean => cfg.actionsAll || cfg.actions.includes(action)
-
-    await ctx.permission.hook("evaluate", async (ev) => {
+    const controller = new AbortController()
+    void (async () => {
       try {
-        if (!isWatched(ev.action)) return
-        if (ev.effect === "deny") return // final; never touch
-        const invocationId = invocationIdOf(ev)
-        const cwd = ""                       // v0.1: см. resolveCwd-комментарий
-        const key = cacheKey(ev.action, ev.resources, cwd, ev.agent)
+        for await (const ev of ctx.event.subscribe({ signal: controller.signal })) {
+          if ((ev as any).type !== "permission.asked") continue
+          const d = (ev as any).data as import("./types.ts").AskData | undefined
+          if (!d?.sessionID || !d?.id) continue
+          // Foreign projects: this shim judges only actions of its own location.
+          const loc = (ev as any).location?.directory ?? ""
+          if (myLocation && loc !== myLocation) continue
+          try {
+            if (!(cfg.actionsAll || cfg.actions.includes(d.action))) continue
+            const invocationId = invocationIdOf({ source: d.source, sessionID: d.sessionID, action: d.action })
+            const cwd = ""  // v0.1: no OpenCode HTTP calls from the ask handler (deadlock finding). M1: session-event cache
+            const key = cacheKey(d.action, d.resources, cwd)
 
-        if (cfg.cache.enabled) {
-          const cached = cache.get(key)
-          if (cached !== null) {
-            applyToEvent(ev, cached.verdict, cached.message)
-            return
+            if (cfg.cache.enabled) {
+              const cached = cache.get(key)
+              if (cached !== null) {
+                await reply(d.sessionID, d.id, "once", cached.message)
+                continue
+              }
+            }
+
+            if (!cfg.actionsAll && d.resources.length > cfg.budgets.maxRequestCommands) {
+              await reply(d.sessionID, d.id, "reject", "too many commands for one guard evaluation")
+              continue
+            }
+
+            const outcome = await supervisor.check(buildCheckRequest({ data: d, invocationId, cwd }))
+            if (!outcome.ok) {
+              log(cfg.logLevel === "debug" ? "debug" : "warn", `degrade (${outcome.reason}) for ${invocationId}`)
+              // fail-closed: onError → either reject (hard-fail mode) or silence
+              if (cfg.onEngineError === "deny") {
+                await reply(d.sessionID, d.id, "reject", undefined).catch(() => { /* human resolves */ })
+              }
+              continue
+            }
+            const { verdict, message } = outcome.result
+            if (verdict === "allow") {
+              const ttl = outcome.result.commands?.find((c) => c.index === 0)?.cacheTtlMs ?? cfg.cache.defaultTtlMs
+              if (cfg.cache.enabled && ttl > 0) {
+                cache.put(key, ttl, message)
+                registry.remember(invocationId, key)
+              }
+              await reply(d.sessionID, d.id, "once")
+              continue
+            }
+            if (verdict === "deny") {
+              await reply(d.sessionID, d.id, "reject", message)
+              continue
+            }
+            // verdict "ask" → stay silent: the dialog goes to the human (escalation by silence)
+          } catch (e) {
+            log("warn", `ask handler error: ${String(e).slice(0, 200)} — request left to the human (fail-closed)`)
           }
         }
-
-        if (!cfg.actionsAll && ev.resources.length > cfg.budgets.maxRequestCommands) {
-          applyToEvent(ev, cfg.onEngineError)
-          return
-        }
-
-        const outcome = await supervisor.check(buildCheckRequest({ ev, invocationId, cwd }))
-          if (!outcome.ok) {
-          log(cfg.logLevel === "debug" ? "debug" : "warn", `degrade (${outcome.reason}) for ${invocationId}`)
-          applyToEvent(ev, cfg.onEngineError)
-          return
-        }
-        const { verdict, message } = outcome.result
-        if (verdict === "allow") {
-          const ttl = outcome.result.commands?.find((c) => c.index === 0)?.cacheTtlMs ?? cfg.cache.defaultTtlMs
-          if (cfg.cache.enabled && ttl > 0) {
-            cache.put(key, ttl, message)
-            registry.remember(invocationId, key)
-          }
-        }
-        applyToEvent(ev, verdict, message)
       } catch (e) {
-          try { applyToEvent(ev, cfg.onEngineError) } catch { /* не роняем хук */ }
+        log("error", `event subscription error: ${String(e).slice(0, 200)}`)
       }
-    })
+    })()
 
     if (cfg.observeShell) {
       await ctx.shell.hook("create.before", (event) => {
-        supervisor.observe({
-          phase: "create.before",
-          command: event.command,
-          cwd: event.cwd,
-        })
+        supervisor.observe({ phase: "create.before", command: event.command, cwd: event.cwd })
       })
     }
-
     await ctx.tool.hook("execute.after", (event) => {
       const source = (event as { source?: { messageID?: string; id?: string } }).source
       if (source?.messageID === undefined || source.id === undefined) return
@@ -118,6 +138,6 @@ export default Plugin.define({
       if (key !== undefined) registry.remember(`${source.messageID}:${source.id}`, key)
     })
 
-    return () => supervisor.dispose()
+    return () => { controller.abort(); supervisor.dispose() }
   },
 })
