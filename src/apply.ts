@@ -12,10 +12,10 @@ import type { CheckParams, CheckResult, Verdict } from "./types.ts"
 export type CheckOutcome = { ok: true; result: CheckResult } | { ok: false; reason: string }
 
 export interface AskData {
-  id?: string                          // requestID, assigned at publication
-  sessionID?: string
-  action?: string
-  resources?: readonly string[]
+  id: string                          // requestID, assigned at publication
+  sessionID: string
+  action: string
+  resources: readonly string[]
   source?: { type: "tool"; messageID: string; id: string }
 }
 

@@ -70,7 +70,7 @@ export default Plugin.define({
         for await (const ev of ctx.event.subscribe({ signal: controller.signal })) {
           if ((ev as any).type !== "permission.asked") continue
           const d = (ev as any).data as AskData | undefined
-          if (!d?.sessionID || !d?.id) continue
+          if (!d?.id || !d?.sessionID || !d?.action || !Array.isArray(d.resources) || d.resources.length === 0) continue
           // Foreign projects: this shim judges only actions of its own location.
           const loc = (ev as any).location?.directory ?? ""
           if (myLocation && loc !== myLocation) continue
