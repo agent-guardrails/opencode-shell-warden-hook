@@ -7,7 +7,7 @@
 // auto-reject — nothing executes silently.
 
 import { Plugin } from "@opencode/plugin"
-import { replyDecision, buildCheckRequest, cacheKey, invocationIdOf, InvocationRegistry } from "./apply.ts"
+import { replyDecision, buildCheckRequest, cacheKey, invocationIdOf, type AskData, InvocationRegistry } from "./apply.ts"
 import { VerdictCache } from "./cache.ts"
 import { validateOptions } from "./config.ts"
 import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts"
@@ -69,14 +69,14 @@ export default Plugin.define({
       try {
         for await (const ev of ctx.event.subscribe({ signal: controller.signal })) {
           if ((ev as any).type !== "permission.asked") continue
-          const d = (ev as any).data as import("./types.ts").AskData | undefined
+          const d = (ev as any).data as AskData | undefined
           if (!d?.sessionID || !d?.id) continue
           // Foreign projects: this shim judges only actions of its own location.
           const loc = (ev as any).location?.directory ?? ""
           if (myLocation && loc !== myLocation) continue
           try {
             if (!(cfg.actionsAll || cfg.actions.includes(d.action))) continue
-            const invocationId = invocationIdOf({ source: d.source, sessionID: d.sessionID, action: d.action })
+            const invocationId = invocationIdOf(d.source, d.sessionID, d.action)
             const cwd = ""  // v0.1: no OpenCode HTTP calls from the ask handler (deadlock finding). M1: session-event cache
             const key = cacheKey(d.action, d.resources, cwd)
 
