@@ -2,86 +2,95 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { validateOptions } from "../src/config.ts"
 
-const ABS = "/usr/local/bin/shell-warden"
-
-test("missing engine.command is fatal", () => {
-  const r = validateOptions({})
-  assert.equal(r.ok, false)
-  if (!r.ok) assert.match(r.reason, /engine\.command/)
-})
-
-test("relative engine.command[0] is fatal (invariant I2)", () => {
-  const r = validateOptions({ engine: { command: ["warden", "serve"] } })
-  assert.equal(r.ok, false)
-  if (!r.ok) assert.match(r.reason, /absolute path/)
-})
-
-test("defaults apply for a valid absolute command", () => {
-  const r = validateOptions({ engine: { command: [ABS, "serve"] } })
+test("defaults: minimal valid options", () => {
+  const r = validateOptions({ checker: { command: ["/usr/local/bin/shell-warden"] } })
   assert.equal(r.ok, true)
   if (!r.ok) return
-  assert.deepEqual(r.config.engine.command, [ABS, "serve"])
-  assert.equal(r.config.budgets.checkTimeoutMs, 5000)
-  assert.equal(r.config.onEngineError, "ask")
+  assert.equal(r.config.enabled, true)
+  assert.deepEqual(r.config.checker, { command: ["/usr/local/bin/shell-warden"], sha256: null })
+  assert.equal(r.config.budgets.checkTimeoutMs, 2_000)
+  assert.equal(r.config.budgets.killGraceMs, 250)
+  assert.equal(r.config.budgets.maxRequestCommands, 32)
+  assert.equal(r.config.budgets.maxConcurrentSpawns, 8)
+  assert.equal(r.config.onCheckerError, "ask")
   assert.deepEqual(r.config.actions, ["shell"])
   assert.equal(r.config.actionsAll, false)
-  assert.equal(r.config.cache.enabled, true)
-  assert.equal(r.config.observeShell, false)
+  assert.deepEqual(r.config.cache, { enabled: true, maxEntries: 1_024, ttlMs: 0 })
+  assert.deepEqual(r.config.rejectBudget, { maxRejections: 3, windowMs: 1_800_000 })
+  assert.deepEqual(r.config.asConfig, { observeShell: false })
+  assert.equal(r.config.logLevel, "warn")
 })
 
-test("onEngineError allow is fatal (invariant I3)", () => {
-  const r = validateOptions({ engine: { command: [ABS] }, onEngineError: "allow" })
+test("checker.command must be a non-empty string array (fatal)", () => {
+  assert.equal(validateOptions({ checker: { command: "x" } }).ok, false)
+  assert.equal(validateOptions({ checker: { command: [] } }).ok, false)
+  assert.equal(validateOptions({ checker: { command: [1, 2] } }).ok, false)
+})
+
+test("checker.command[0] must be absolute (fatal)", () => {
+  const r = validateOptions({ checker: { command: ["shell-warden"] } })
   assert.equal(r.ok, false)
-  if (!r.ok) assert.match(r.reason, /never valid/)
+  if (!r.ok) assert.match(r.reason, /absolute/)
 })
 
-test("budgets clamp with warnings", () => {
-  const warns: string[] = []
-  const r = validateOptions({ engine: { command: [ABS] }, budgets: { checkTimeoutMs: 999_999 } }, (m) => warns.push(m))
+test("{env:NAME} substitution resolves; unresolved is fatal (I2)", () => {
+  const r = validateOptions({ checker: { command: ["{env:HOME}", "check"] } })
   assert.equal(r.ok, true)
-  if (!r.ok) return
-  assert.equal(r.config.budgets.checkTimeoutMs, 30_000)
-  assert.ok(warns.some((w) => w.includes("checkTimeoutMs")))
-})
-
-test("unknown keys are ignored with warning", () => {
-  const warns: string[] = []
-  const r = validateOptions({ engine: { command: [ABS] }, wat: 1 }, (m) => warns.push(m))
-  assert.equal(r.ok, true)
-  assert.ok(warns.some((w) => w.includes('"wat"')))
-})
-
-test("{env:NAME} substitution resolves and fails closed", () => {
-  process.env.WARDEN_TEST_BIN = ABS
-  const ok = validateOptions({ engine: { command: ["{env:WARDEN_TEST_BIN}"] } })
-  assert.equal(ok.ok, true)
-  if (ok.ok) assert.deepEqual(ok.config.engine.command, [ABS])
-  delete process.env.WARDEN_TEST_BIN
-  const bad = validateOptions({ engine: { command: ["{env:WARDEN_TEST_BIN}"] } })
+  if (r.ok) assert.equal(r.config.checker.command[0], process.env.HOME)
+  const bad = validateOptions({ checker: { command: ["{env:SW_NO_SUCH_VAR_ZZ}", "check"] } })
   assert.equal(bad.ok, false)
 })
 
-test("actions filtering and wildcard", () => {
-  const r = validateOptions({ engine: { command: [ABS] }, actions: ["shell", "nope", "*"] })
+test("sha256 must be null or 64 hex chars (fatal)", () => {
+  assert.equal(validateOptions({ checker: { command: ["/x"], sha256: "abc" } }).ok, false)
+  const r = validateOptions({ checker: { command: ["/x"], sha256: "a".repeat(64) } })
+  assert.equal(r.ok, true)
+})
+
+test("onCheckerError 'allow' is rejected (I3)", () => {
+  const r = validateOptions({ checker: { command: ["/x"] }, onCheckerError: "allow" })
+  assert.equal(r.ok, false)
+  if (!r.ok) assert.match(r.reason, /never 'allow'/)
+  assert.equal(validateOptions({ checker: { command: ["/x"] }, onCheckerError: "deny" }).ok, true)
+})
+
+test("budgets are clamped with warnings", () => {
+  const r = validateOptions({ checker: { command: ["/x"] }, budgets: { checkTimeoutMs: 5, maxRequestCommands: 999, killGraceMs: "no" } })
   assert.equal(r.ok, true)
   if (!r.ok) return
+  assert.equal(r.config.budgets.checkTimeoutMs, 100)
+  assert.equal(r.config.budgets.maxRequestCommands, 128)
+  assert.equal(r.config.budgets.killGraceMs, 250)
+  assert.ok(r.warns.some((w: string) => w.includes("checkTimeoutMs")))
+})
+
+test("unknown keys are ignored with a warning (§4.3)", () => {
+  const r = validateOptions({ legacy: true, checker: { command: ["/x"], protocolVersion: 3 } })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.ok(r.warns.some((w: string) => w.includes('"legacy"')))
+  assert.ok(r.warns.some((w: string) => w.includes('"protocolVersion"')))
+})
+
+test("actions '*': actionsAll with '*' filtered out", () => {
+  const r = validateOptions({ checker: { command: ["/x"] }, actions: ["*", "shell"] })
+  const r2 = validateOptions({ checker: { command: ["/x"] }, actions: "*" })
+  if (!r.ok || !r2.ok) return assert.fail("expected ok")
   assert.equal(r.config.actionsAll, true)
-  assert.deepEqual(r.config.actions, ["*"])
-  const r2 = validateOptions({ engine: { command: [ABS] }, actions: ["nope"] })
-  assert.equal(r2.ok, true)
-  if (r2.ok) assert.deepEqual(r2.config.actions, ["shell"])
+  assert.deepEqual(r.config.actions, ["shell"])
+  assert.equal(r2.config.actionsAll, true)
+  assert.deepEqual(r2.config.actions, ["shell"])
 })
 
-test("enabled=false disables the plugin", () => {
-  const r = validateOptions({ enabled: false, engine: { command: [ABS] } })
-  assert.equal(r.ok, false)
-  if (!r.ok) assert.match(r.reason, /disabled/)
+test("debug.dir must be absolute", () => {
+  const r = validateOptions({ checker: { command: ["/x"] }, debug: { enabled: true, dir: "relative/dir" } })
+  assert.equal(r.ok, true)
+  if (r.ok) assert.equal(r.config.debug.dir, null)
+  assert.ok(r.warns.some((w: string) => w.includes("debug.dir")))
 })
 
-test("sha256 must be 64 hex chars or null", () => {
-  const bad = validateOptions({ engine: { command: [ABS], sha256: "zz" } })
-  assert.equal(bad.ok, false)
-  const good = validateOptions({ engine: { command: [ABS], sha256: "a".repeat(64) } })
-  assert.equal(good.ok, true)
-  if (good.ok) assert.equal(good.config.engine.sha256, "a".repeat(64))
+test("enabled:false disables the plugin", () => {
+  const r = validateOptions({ checker: { command: ["/x"] }, enabled: false })
+  assert.equal(r.ok, true)
+  if (r.ok) assert.equal(r.config.enabled, false)
 })
