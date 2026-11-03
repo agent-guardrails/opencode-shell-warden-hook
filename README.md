@@ -1,33 +1,16 @@
 # opencode-shell-warden-hook
 
-Thin **OpenCode V2** plugin (the "hook" part of the shell-warden system): it receives permission
-evaluation events from OpenCode and asks the **shell-warden engine** for a verdict over
-NDJSON JSON-RPC on stdio.
-
-The shim contains **no policy logic** — only transport, supervision, budgets, verdict application
-and fail-closed degradation. Spec: `agent-guardrails/opencode-adrs` → `docs/policyd-plugin-design/`
-(`03-shim.md`, `04-shim-config.md`, `02-protocol.md`).
-
-## How it works
-
-```
-OpenCode server ── permission.hook("evaluate") ── shim ── policy/check ──▶ shell-warden engine
-                        ◀── tighten-only verdict ───────────── verdict: allow | ask | deny
-```
-
-- `allow` / `deny` are applied to the hook event; `ask` falls through to OpenCode's native prompt.
-- The shim never loosens a decision and never synthesizes `allow`: any engine anomaly
-  (crash, timeout, malformed frame, bad protocol version) degrades to `onEngineError` (`ask` or `deny`).
-- Engine runs as a persistent child process spawned **without inherited environment**, from an
-  **absolute** argv, with an exact `protocolVersion` handshake.
+OpenCode V2 hook plugin: forwards shell permission decisions to the shell-warden
+checker over the one-shot letter protocol ([ADR-0016](https://github.com/agent-guardrails/docs/blob/main/adr/0016-two-tier-enforcement.md) —
+no server, no long-lived process; the checker is spawned fresh on every check).
 
 ## Install
 
 ```sh
-npm install @agent-guardrails/opencode-shell-warden-hook   # or reference a local checkout
+npm install @agent-guardrails/opencode-shell-warden-hook
 ```
 
-`opencode.jsonc`:
+`opencode.jsonc` (options per `docs/spec/shell-warden/04-shim-config.md` v2.0):
 
 ```jsonc
 {
@@ -35,8 +18,11 @@ npm install @agent-guardrails/opencode-shell-warden-hook   # or reference a loca
     {
       "package": "@agent-guardrails/opencode-shell-warden-hook",
       "options": {
-        "engine": { "command": ["/usr/local/bin/shell-warden", "serve"] },
-        "onEngineError": "ask",
+        "checker": {
+          "command": ["/opt/homebrew/bin/shell-warden", "--config", "/Users/me/.config/shell-warden/config.jsonc"]
+        },
+        "budgets": { "checkTimeoutMs": 2000, "killGraceMs": 250 },
+        "onCheckerError": "ask",
         "actions": ["shell"]
       }
     }
@@ -44,33 +30,24 @@ npm install @agent-guardrails/opencode-shell-warden-hook   # or reference a loca
 }
 ```
 
-All options, defaults and clamps: `04-shim-config.md` in the spec repo. Unknown keys are ignored
-with a warning; invalid `engine.command` (relative path, failed `{env:…}` substitution) disables
-the plugin at load — that is the fail-closed posture for misconfiguration.
+## How it works
 
-## Development
-
-```sh
-npm install
-npm test        # node --test (35 contract/unit tests, mock engine included)
-npm run typecheck
+```
+OpenCode server ── permission.asked ── shim ── spawn shell-warden (letter in → verdict out)
+                                     ◀── allow | ask | deny ── (one JSON verdict, then EOF)
 ```
 
-Layout:
+- `allow` → the request is confirmed (`once`); `deny` → rejected with the checker's
+  prescriptive message; `ask` → the request is left untouched for the native prompt.
+- The checker is a pure function of (letter, config): one spawn per check, empty
+  child environment, no cache, no network, no state (02-letter-verdict §2.1).
+- The shim never loosens a decision and never synthesizes `allow`: checker defects
+  (exit ≠ 0, timeout, malformed output, schema drift) degrade to `onCheckerError`
+  (`ask` or `deny`).
+- Hook-owned state: allow-only cache (`cache.ttlMs`) and the reject budget per rule
+  per session (`rejectBudget`) — exhaustion hands the ask to the human.
 
-| Module | Responsibility |
-|---|---|
-| `src/protocol.ts` | NDJSON framing, byte caps, frame parser, id pool |
-| `src/supervisor.ts` | engine lifecycle: spawn → handshake → ready, violations → restart → unhealthy, dispose |
-| `src/cache.ts` | allow-only TTL LRU verdict cache |
-| `src/apply.ts` | request building, cache keys, tighten-only verdict mapping |
-| `src/config.ts` | options validation (fatal vs warn+clamp) |
-| `src/index.ts` | `Plugin.define` + hook registrations |
-
-Tests run on Node ≥ 22.6 using native TypeScript type-stripping (no build step).
-The engine side (segmentation, rules, verdicts) is a separate project: `agent-guardrails/shell-warden`.
-
-## Status
-
-M0/M1 (shim): implemented — protocol codec, supervisor, cache, apply, config, hook wiring.
-Not yet: `policy/observe` hardening, sha256 pinning is implemented at spawn only (no MDM story), engine itself.
+All options, defaults and clamps: `04-shim-config.md` in the spec repo. Unknown keys
+are ignored with a warning; only a broken `checker.command` / `sha256` /
+`onCheckerError: "allow"` disables the plugin at load — the fail-closed posture
+for misconfiguration.

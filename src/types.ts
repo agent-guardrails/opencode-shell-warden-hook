@@ -1,77 +1,59 @@
-// Wire protocol types — mirror of docs/policyd-plugin-design/02-protocol.md (v1)
-// and schemas/wire.v1.schema.json. Keep in sync with the schema.
+// Letter & verdict types — mirror of docs/spec/shell-warden/02-letter-verdict.md (v2.0)
+// and schemas/shell-warden.letter.v1.schema.json / shell-warden.verdict.v1.schema.json.
+// Keep in sync with the schemas.
 
 export type Verdict = "allow" | "ask" | "deny"
 
-export interface InitializeParams {
-  protocolVersion: number
-  client: { name: string; version: string; opencode?: string }
+export interface LetterInvocation {
+  id: string                       // `${messageID}:${callID}` — unique per tool call
+  sessionID: string
+  agent?: string
+  projectDir?: string
 }
 
-export interface InitializeResult {
-  protocolVersion: number
-  engine: { name: string; version: string }
-  capabilities?: Record<string, unknown>
-  config?: { source?: string; stages?: string[]; loadedAt?: string }
-}
-
-export interface CheckCommand {
+export interface LetterCommand {
   index: number
-  raw: string
+  raw: string                      // command text exactly as OpenCode produced it, ≤ 8 KiB
   cwd: string
 }
 
-export interface CheckParams {
-  invocation: {
-    id: string
-    sessionID: string
-    agent?: string
-    hook: string
-    projectDir?: string
-    startedAt?: string
-  }
+export interface Letter {
+  version: 1
+  invocation: LetterInvocation
   action: string
-  commands: CheckCommand[]
-  context?: {
-    source?: { type: "tool"; messageID?: string; id?: string }
-    metadata?: Record<string, unknown>
-  }
+  commands: LetterCommand[]
 }
 
-export interface CheckCommandResult {
+export interface LetterCommandVerdict {
   index: number
   verdict: Verdict
-  stage?: string | null
-  ruleId?: string | null
-  reason?: string
+  ruleId?: string
   classification?: "static" | "opaque"
-  cacheTtlMs?: number
+  match?: "argv" | "raw"
+  facts?: Record<string, unknown>
 }
 
-export interface CheckResult {
-  invocationId: string
-  verdict: Verdict
-  message?: string
-  commands?: CheckCommandResult[]
-  engine?: { checkMs?: number }
+export interface LetterVerdict {
+  invocationId: string             // echo of letter.invocation.id
+  verdict: Verdict                 // aggregate — authoritative, hook applies tighten-only
+  message?: string                 // required on deny; ≤ 512 chars
+  commands?: LetterCommandVerdict[]
 }
 
-export type WireMessage =
-  | { jsonrpc: "2.0"; id: number; method: string; params: unknown }
-  | { jsonrpc: "2.0"; id: number; result: unknown }
-  | { jsonrpc: "2.0"; id: number | null; error: { code: number; message: string; data?: { fatal?: boolean } } }
-  | { jsonrpc: "2.0"; method: string; params?: unknown }
+// Bounds from 02-letter-verdict.md §2.2/§2.3 (hook enforces before spawning)
+export const MAX_LETTER_BYTES = 64 * 1024
+export const MAX_COMMAND_BYTES = 8 * 1024
+export const MAX_VERDICT_BYTES = 64 * 1024
+export const MAX_FACTS_BYTES = 16 * 1024
+export const MAX_MESSAGE_CHARS = 512
 
-// OpenCode V2 permission evaluate hook event (mutable: effect, message)
-export interface PermissionEvaluation {
-  readonly sessionID: string
-  readonly agent?: string
-  readonly action: string
-  readonly resources: readonly string[]
-  readonly metadata?: Record<string, unknown>
-  readonly source?: { type: "tool"; messageID: string; id: string }
-  effect: Verdict
-  message?: string
+// OpenCode V2 permission.asked event payload (relevant subset)
+export interface AskData {
+  id: string                          // requestID, assigned at publication
+  sessionID: string
+  action: string
+  resources: readonly string[]
+  source?: { type: "tool"; messageID: string; id: string }
 }
 
 // shell.create.before hook event (audit-only usage)

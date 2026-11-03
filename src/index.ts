@@ -1,29 +1,34 @@
-// opencode-shell-warden-hook — OpenCode V2 plugin entry.
+// opencode-shell-warden-hook — OpenCode V2 plugin entry (two-tier, ADR-0016).
 // Mechanism per ADR-0013: the native substrate is the fail-closed boundary
 // (permissions: shell → ask). The shim listens for published permission
-// requests, consults the shell-warden engine, and replies programmatically:
-// allow → "once", deny → "reject" (with reason), ask → silence (human decides).
-// Fail-closed: with the hook absent every ask reaches the human / headless
-// auto-reject — nothing executes silently.
+// requests, spawns the one-shot shell-warden checker per request
+// (letter in on stdin → verdict out on stdout, 02-letter-verdict v2.0) and
+// replies programmatically:
+//   allow → "once", deny → "reject" (with reason), ask → silence (human decides).
+// Checker defects degrade to onCheckerError ∈ {ask, deny} — never allow.
 
+import { mkdirSync, appendFileSync } from "node:fs"
 import { Plugin } from "@opencode/plugin"
-import { replyDecision, buildCheckRequest, cacheKey, invocationIdOf, type AskData, InvocationRegistry } from "./apply.ts"
+import { replyDecision, buildLetter, cacheKey, invocationIdOf, type AskData } from "./apply.ts"
 import { VerdictCache } from "./cache.ts"
-import { validateOptions } from "./config.ts"
-import { EngineSupervisor, type SupervisorOptions } from "./supervisor.ts"
+import { validateOptions, type Opts } from "./config.ts"
+import { CheckerInvoker, RejectBudgets, verifyPin, type CheckerOptions, type CheckerOutcome } from "./checker.ts"
+import { MAX_LETTER_BYTES, MAX_COMMAND_BYTES } from "./types.ts"
 
-const VERSION = "0.1.0"
 const PLUGIN_ID = "opencode-shell-warden-hook"
 
 export default Plugin.define({
   id: PLUGIN_ID,
   async setup(ctx) {
-    const opts = validateOptions(ctx.options, (m) => console.error(m))
+    const opts = validateOptions(ctx.options)
     if (!opts.ok) {
       console.error(`[${PLUGIN_ID}] Disabled: ${opts.reason}`)
       return
     }
-    const cfg = opts.config
+    const cfg: Opts = opts.config
+    for (const w of opts.warns) console.error(`[${PLUGIN_ID}] warn: ${w}`)
+    if (cfg.enabled === false) return
+
     const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const
     type Level = keyof typeof LEVELS
     const threshold = LEVELS[cfg.logLevel]
@@ -31,29 +36,27 @@ export default Plugin.define({
       if (LEVELS[level] >= threshold) console.error(msg)
     }
 
-    const supOpts: SupervisorOptions = {
-      command: cfg.engine.command,
-      protocolVersion: cfg.engine.protocolVersion,
-      sha256: cfg.engine.sha256,
-      cwd: cfg.engine.cwd,
-      clientVersion: VERSION,
-      budgets: {
-        handshakeTimeoutMs: cfg.budgets.handshakeTimeoutMs,
-        checkTimeoutMs: cfg.budgets.checkTimeoutMs,
-        killGraceMs: cfg.budgets.killGraceMs,
-        maxFrameBytes: cfg.budgets.maxFrameBytes,
-        maxInFlight: cfg.budgets.maxInFlight,
-        maxViolations: cfg.budgets.maxViolations,
-        maxViolationsWindowMs: cfg.budgets.maxViolationsWindowMs,
-        maxBackoffMs: cfg.engine.restart.maxBackoffMs,
-        windowMs: cfg.engine.restart.windowMs,
-        resetAfterMs: cfg.engine.restart.resetAfterMs,
-      },
+    // Debug NDJSON per check (03 §3.5); default dir per 04 §4.2.
+    let debugSink: ((record: Record<string, unknown>) => void) | null = null
+    if (cfg.debug.enabled) {
+      const dir = cfg.debug.dir ?? `${process.env.HOME ?? ""}/.local/state/shell-warden/hook`
+      try { mkdirSync(dir, { recursive: true }) } catch { /* debug is best-effort */ }
+      const file = `${dir}/hook.ndjson`
+      debugSink = (record) => { try { appendFileSync(file, JSON.stringify(record) + "\n") } catch { /* debug is best-effort */ } }
+    }
+
+    const checkerOpts: CheckerOptions = {
+      command: cfg.checker.command,
+      sha256: cfg.checker.sha256,
+      checkTimeoutMs: cfg.budgets.checkTimeoutMs,
+      killGraceMs: cfg.budgets.killGraceMs,
+      maxConcurrentSpawns: cfg.budgets.maxConcurrentSpawns,
       log,
     }
-    const supervisor = new EngineSupervisor(supOpts)
+    verifyPin(checkerOpts)
+    const checker = new CheckerInvoker(checkerOpts)
     const cache = new VerdictCache(cfg.cache.enabled ? cfg.cache.maxEntries : 0)
-    const registry = new InvocationRegistry()
+    const rejectBudgets = new RejectBudgets(cfg.rejectBudget.maxRejections, cfg.rejectBudget.windowMs)
 
     const myLocation = ctx.location?.directory ?? ""
     const reply = (sessionID: string, requestID: string, decision: "once" | "reject", message?: string) =>
@@ -77,8 +80,8 @@ export default Plugin.define({
           try {
             if (!(cfg.actionsAll || cfg.actions.includes(d.action))) continue
             const invocationId = invocationIdOf(d.source, d.sessionID, d.action)
-            const cwd = ""  // v0.1: no OpenCode HTTP calls from the ask handler (deadlock finding). M1: session-event cache
-            const key = cacheKey(d.action, d.resources, cwd)
+            const projectDir = myLocation || undefined
+            const key = cacheKey(d.action, d.resources, projectDir ?? "")
 
             if (cfg.cache.enabled) {
               const cached = cache.get(key)
@@ -88,35 +91,48 @@ export default Plugin.define({
               }
             }
 
-            if (!cfg.actionsAll && d.resources.length > cfg.budgets.maxRequestCommands) {
-              await reply(d.sessionID, d.id, "reject", "too many commands for one guard evaluation")
+            // Pre-spawn bounds (02 §2.2): breach ⇒ local degrade, no spawn.
+            const letter = buildLetter({ data: d, invocationId, projectDir })
+            const letterBytes = Buffer.byteLength(JSON.stringify(letter))
+            const oversize =
+              letter.commands.length > cfg.budgets.maxRequestCommands ||
+              letterBytes > MAX_LETTER_BYTES ||
+              letter.commands.some((c) => Buffer.byteLength(c.raw) > MAX_COMMAND_BYTES)
+            if (oversize) {
+              log("warn", `letter bounds breach for ${invocationId} — degrade (${cfg.onCheckerError})`)
+              if (cfg.onCheckerError === "deny") await reply(d.sessionID, d.id, "reject", undefined).catch(() => {})
               continue
             }
 
-            const outcome = await supervisor.check(buildCheckRequest({ data: d, invocationId, cwd }))
+            const outcome: CheckerOutcome = await checker.check(letter)
+            debugSink?.({ ts: new Date().toISOString(), invocationId, action: d.action, outcomeOk: outcome.ok })
             if (!outcome.ok) {
               log(cfg.logLevel === "debug" ? "debug" : "warn", `degrade (${outcome.reason}) for ${invocationId}`)
-              // fail-closed: onError → either reject (hard-fail mode) or silence
-              if (cfg.onEngineError === "deny") {
+              if (cfg.onCheckerError === "deny") {
                 await reply(d.sessionID, d.id, "reject", undefined).catch(() => { /* human resolves */ })
               }
               continue
             }
-            const { verdict, message } = outcome.result
-            if (verdict === "allow") {
-              const ttl = outcome.result.commands?.find((c) => c.index === 0)?.cacheTtlMs ?? cfg.cache.defaultTtlMs
-              if (cfg.cache.enabled && ttl > 0) {
-                cache.put(key, ttl, message)
-                registry.remember(invocationId, key)
-              }
+
+            const result = outcome.verdict
+            const decision = replyDecision(result.verdict)
+            if (decision === "once") {
+              if (cfg.cache.enabled && cfg.cache.ttlMs > 0) cache.put(key, cfg.cache.ttlMs, result.message)
               await reply(d.sessionID, d.id, "once")
               continue
             }
-            if (verdict === "deny") {
-              await reply(d.sessionID, d.id, "reject", message)
+            if (decision === "reject") {
+              // Reject budget (ADR-0010, hook-owned): exhausted ⇒ stop answering —
+              // the native ask reaches the human. Never auto-allowed.
+              const ruleId = result.commands?.[0]?.ruleId ?? "unknown"
+              if (!rejectBudgets.trySpend(d.sessionID, ruleId)) {
+                log("info", `reject budget exhausted for ${ruleId} (${invocationId}) — left to the human`)
+                continue
+              }
+              await reply(d.sessionID, d.id, "reject", result.message)
               continue
             }
-            // verdict "ask" → stay silent: the dialog goes to the human (escalation by silence)
+            // verdict "ask" → stay silent: the native dialog goes to the human
           } catch (e) {
             log("warn", `ask handler error: ${String(e).slice(0, 200)} — request left to the human (fail-closed)`)
           }
@@ -126,18 +142,12 @@ export default Plugin.define({
       }
     })()
 
-    if (cfg.observeShell) {
+    if (cfg.asConfig.observeShell) {
       await ctx.shell.hook("create.before", (event) => {
-        supervisor.observe({ phase: "create.before", command: event.command, cwd: event.cwd })
+        debugSink?.({ ts: new Date().toISOString(), phase: "create.before", command: event.command, cwd: event.cwd })
       })
     }
-    await ctx.tool.hook("execute.after", (event) => {
-      const source = (event as { source?: { messageID?: string; id?: string } }).source
-      if (source?.messageID === undefined || source.id === undefined) return
-      const key = registry.keyFor(`${source.messageID}:${source.id}`)
-      if (key !== undefined) registry.remember(`${source.messageID}:${source.id}`, key)
-    })
 
-    return () => { controller.abort(); supervisor.dispose() }
+    return () => { controller.abort() }
   },
 })
