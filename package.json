@@ -1,8 +1,12 @@
 {
-  "name": "opencode-shell-warden-hook",
+  "name": "@agent-guardrails/opencode-shell-warden-hook",
   "version": "0.1.0",
   "description": "OpenCode V2 hook plugin: forwards shell permission decisions to the shell-warden engine over NDJSON JSON-RPC stdio",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agent-guardrails/opencode-shell-warden-hook.git"
+  },
   "exports": {
     ".": "./src/index.ts"
   },
@@ -19,6 +23,9 @@
   "scripts": {
     "test": "node --test test/",
     "typecheck": "tsc --noEmit"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=22.6"
