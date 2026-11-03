@@ -24,7 +24,7 @@ OpenCode server ── permission.hook("evaluate") ── shim ── policy/che
 ## Install
 
 ```sh
-npm install opencode-shell-warden-hook   # or reference a local checkout
+npm install @agent-guardrails/opencode-shell-warden-hook   # or reference a local checkout
 ```
 
 `opencode.jsonc`:
@@ -33,7 +33,7 @@ npm install opencode-shell-warden-hook   # or reference a local checkout
 {
   "plugins": [
     {
-      "package": "opencode-shell-warden-hook",
+      "package": "@agent-guardrails/opencode-shell-warden-hook",
       "options": {
         "engine": { "command": ["/usr/local/bin/shell-warden", "serve"] },
         "onEngineError": "ask",
