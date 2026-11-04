@@ -27,24 +27,29 @@ export function cacheKey(action: string, resources: readonly string[], cwd: stri
     .digest("hex")
 }
 
-/** Letter per 02-letter-verdict.md §2.2 — exactly the schema fields, no extras. */
+/** Letter per 02-letter-verdict.md §2.2 — exactly the schema fields, no extras.
+ * `projectDir` is required and non-empty: the engine invalidates every letter whose
+ * commands[].cwd is empty ("letter commands[0].cwd must be 1..4096 chars"), and the
+ * ask payload carries no per-command cwd — the permission request's directory is the
+ * only cwd the shim has. Callers without a directory must degrade before calling. */
 export function buildLetter(args: {
   data: AskData
   invocationId: string
-  projectDir?: string
+  projectDir: string
   agent?: string
 }): Letter {
   const { data, invocationId, projectDir, agent } = args
+  if (!projectDir) throw new Error("buildLetter: projectDir is required — the engine rejects letters with an empty commands[].cwd")
   return {
     version: 1,
     invocation: {
       id: invocationId,
       sessionID: data.sessionID ?? "",
       ...(agent !== undefined ? { agent } : {}),
-      ...(projectDir !== undefined ? { projectDir } : {}),
+      projectDir,
     },
     action: data.action ?? "",
-    commands: (data.resources ?? []).map((raw, index) => ({ index, raw, cwd: "" })),
+    commands: (data.resources ?? []).map((raw, index) => ({ index, raw, cwd: projectDir })),
   }
 }
 
