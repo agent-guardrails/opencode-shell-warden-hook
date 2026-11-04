@@ -80,8 +80,17 @@ export default Plugin.define({
           try {
             if (!(cfg.actionsAll || cfg.actions.includes(d.action))) continue
             const invocationId = invocationIdOf(d.source, d.sessionID, d.action)
-            const projectDir = myLocation || undefined
-            const key = cacheKey(d.action, d.resources, projectDir ?? "")
+            // The ask payload carries no per-command cwd; the permission event's
+            // location is the only directory the shim has. Letters with an empty
+            // commands[].cwd are rejected by the engine, so without one we degrade —
+            // never spawn a letter the engine would refuse.
+            const projectDir = loc || myLocation || ""
+            if (!projectDir) {
+              log("warn", `no project directory for ${invocationId} — degrade (${cfg.onCheckerError})`)
+              if (cfg.onCheckerError === "deny") await reply(d.sessionID, d.id, "reject", undefined).catch(() => {})
+              continue
+            }
+            const key = cacheKey(d.action, d.resources, projectDir)
 
             if (cfg.cache.enabled) {
               const cached = cache.get(key)

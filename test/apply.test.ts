@@ -23,8 +23,8 @@ test("buildLetter matches 02-letter-verdict §2.2 with no v1.x extras", () => {
     invocation: { id: "msg_1:call_1", sessionID: "ses_1", projectDir: "/work/repo" },
     action: "shell",
     commands: [
-      { index: 0, raw: "git status", cwd: "" },
-      { index: 1, raw: "npm test", cwd: "" },
+      { index: 0, raw: "git status", cwd: "/work/repo" },
+      { index: 1, raw: "npm test", cwd: "/work/repo" },
     ],
   })
   // v1.x protocol fields must NOT leak into the letter
@@ -32,9 +32,17 @@ test("buildLetter matches 02-letter-verdict §2.2 with no v1.x extras", () => {
   assert.equal(Object.keys(l.invocation).includes("startedAt"), false)
 })
 
+test("buildLetter rejects an empty projectDir — the engine invalidates letters with empty commands[].cwd", () => {
+  assert.throws(
+    () => buildLetter({ data: data(), invocationId: "msg_1:call_1", projectDir: "" }),
+    /projectDir is required/,
+  )
+})
+
 test("buildLetter without source uses the anon invocation id", () => {
-  const l = buildLetter({ data: data({ source: undefined }), invocationId: "anon:ses_1:shell" })
+  const l = buildLetter({ data: data({ source: undefined }), invocationId: "anon:ses_1:shell", projectDir: "/work/repo" })
   assert.equal(l.invocation.id, "anon:ses_1:shell")
+  assert.equal(l.commands[0]?.cwd, "/work/repo")
 })
 
 test("cacheKey is stable and sensitive to inputs", () => {
