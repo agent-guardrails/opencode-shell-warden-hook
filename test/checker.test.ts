@@ -11,11 +11,11 @@ const letter: Letter = {
   version: 1,
   invocation: { id: "msg:call", sessionID: "ses_1" },
   action: "shell",
-  commands: [{ index: 0, raw: "git status", cwd: "" }],
+  commands: [{ index: 0, raw: "git status", cwd: "/work/repo" }],
 }
 
 const verdictBody = (over: Record<string, unknown> = {}): string =>
-  JSON.stringify({ invocationId: "msg:call", verdict: "allow", commands: [{ index: 0, verdict: "allow" }], ...over })
+  JSON.stringify({ invocationId: "msg:call", verdict: "allow", commands: [{ index: 0, verdict: "allow", classification: "static", match: "argv" }], ...over })
 
 const makeOpts = (over: Partial<CheckerOptions> = {}): CheckerOptions => ({
   command: [NODE, MOCK, "--behavior", JSON.stringify({})],
@@ -32,6 +32,49 @@ test("valid verdict passes through", async () => {
   const out = await invoker.check(letter)
   assert.equal(out.ok, true)
   if (out.ok) assert.equal(out.verdict.verdict, "allow")
+})
+
+test("complete opaque ask verdict with raw match passes through", async () => {
+  const body = verdictBody({ verdict: "ask", commands: [{ index: 0, verdict: "ask", ruleId: "r/opaque", classification: "opaque", match: "raw" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.equal(out.ok, true)
+  if (out.ok) assert.equal(out.verdict.verdict, "ask")
+})
+
+test("verdict missing command classification degrades", async () => {
+  const body = verdictBody({ commands: [{ index: 0, verdict: "allow", match: "argv" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.deepEqual(out, { ok: false, reason: "commands[0].classification invalid" })
+})
+
+test("verdict missing command match degrades", async () => {
+  const body = verdictBody({ commands: [{ index: 0, verdict: "allow", classification: "static" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.deepEqual(out, { ok: false, reason: "commands[0].match invalid" })
+})
+
+test("unknown command classification degrades", async () => {
+  const body = verdictBody({ commands: [{ index: 0, verdict: "allow", classification: "invalid", match: "argv" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.deepEqual(out, { ok: false, reason: "commands[0].classification invalid" })
+})
+
+test("unknown command match degrades", async () => {
+  const body = verdictBody({ commands: [{ index: 0, verdict: "allow", classification: "static", match: "unknown" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.deepEqual(out, { ok: false, reason: "commands[0].match invalid" })
+})
+
+test("raw command match cannot allow", async () => {
+  const body = verdictBody({ commands: [{ index: 0, verdict: "allow", classification: "opaque", match: "raw" }] })
+  const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
+  const out = await invoker.check(letter)
+  assert.deepEqual(out, { ok: false, reason: "commands[0].raw match cannot allow" })
 })
 
 test("deny with prescriptive message passes", async () => {

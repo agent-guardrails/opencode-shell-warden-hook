@@ -28,8 +28,8 @@ export interface LetterCommandVerdict {
   index: number
   verdict: Verdict
   ruleId?: string
-  classification?: "static" | "opaque"
-  match?: "argv" | "raw"
+  classification: "static" | "opaque"
+  match: "argv" | "raw"
   facts?: Record<string, unknown>
 }
 
