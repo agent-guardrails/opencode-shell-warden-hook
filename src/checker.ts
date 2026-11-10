@@ -136,11 +136,14 @@ function parseVerdict(letter: Letter, raw: string): { ok: true; value: LetterVer
     if (cv.verdict !== "allow" && cv.verdict !== "ask" && cv.verdict !== "deny") {
       return { ok: false, reason: `commands[${i}].verdict invalid` }
     }
-    if (typeof cv.classification !== "undefined" && cv.classification !== "static" && cv.classification !== "opaque") {
+    if (cv.classification !== "static" && cv.classification !== "opaque") {
       return { ok: false, reason: `commands[${i}].classification invalid` }
     }
-    if (typeof cv.match !== "undefined" && cv.match !== "argv" && cv.match !== "raw") {
+    if (cv.match !== "argv" && cv.match !== "raw") {
       return { ok: false, reason: `commands[${i}].match invalid` }
+    }
+    if (cv.match === "raw" && cv.verdict === "allow") {
+      return { ok: false, reason: `commands[${i}].raw match cannot allow` }
     }
     if (cv.facts !== undefined) {
       const bytes = JSON.stringify(cv.facts).length
