@@ -6,9 +6,9 @@
 // The shim never mutates permission events and never synthesizes allow.
 
 import { createHash } from "node:crypto"
-import type { Letter, LetterVerdict } from "./types.ts"
+import type { Letter, V2Result } from "./types.ts"
 
-export type { AskData, Verdict, LetterCommandVerdict } from "./types.ts"
+export type { AskData, Verdict } from "./types.ts"
 import type { AskData } from "./types.ts"
 
 export function invocationIdOf(source?: { messageID: string; id: string }, sessionID?: string, action?: string): string {
@@ -54,7 +54,7 @@ export function buildLetter(args: {
 }
 
 /** Maps a verdict to the reply decision: `"once"` | `"reject"` | `null` (silence). */
-export function replyDecision(v: LetterVerdict["verdict"]): "once" | "reject" | null {
+export function replyDecision(v: V2Result["verdict"]): "once" | "reject" | null {
   if (v === "allow") return "once"
   if (v === "deny") return "reject"
   return null
