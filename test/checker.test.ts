@@ -1,55 +1,10 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { CheckerInvoker, RejectBudgets, verifyPin, type CheckerOptions } from "../src/checker.ts"
+import { CheckerInvoker, RejectBudgets, verifyPin } from "../src/checker.ts"
 import type { Letter } from "../src/types.ts"
 import { MAX_VERDICT_BYTES } from "../src/types.ts"
 import { writeFileSync } from "node:fs"
-
-const NODE = process.execPath
-const MOCK = new URL("./helpers/mock-checker.mjs", import.meta.url).pathname
-
-const letter: Letter = {
-  version: 1,
-  invocation: { id: "msg:call", sessionID: "ses_1" },
-  action: "shell",
-  commands: [{ index: 0, raw: "git status", cwd: "" }],
-}
-
-const V2_PROTOCOL = "shell-warden.verdict.v2"
-
-const command = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-  index: 0,
-  verdict: "allow",
-  ruleId: "git/allow-status",
-  classification: "static",
-  match: "argv",
-  facts: {
-    evidence: "complete",
-    reasons: ["complete"],
-    selectedProfiles: ["git"],
-    matched: ["git/allow-status"],
-    qualified: ["git/allow-status"],
-    rejected: [],
-    votes: ["allow:git/allow-status"],
-  },
-  ...over,
-})
-
-const verdictBody = (over: Record<string, unknown> = {}, commandOver: Record<string, unknown> = {}): string =>
-  JSON.stringify({
-    protocol: V2_PROTOCOL,
-    result: { invocationId: "msg:call", verdict: "allow", commands: [command(commandOver)], ...over },
-  })
-
-const makeOpts = (over: Partial<CheckerOptions> = {}): CheckerOptions => ({
-  command: [NODE, MOCK, "--behavior", JSON.stringify({})],
-  sha256: null,
-  checkTimeoutMs: 2_000,
-  killGraceMs: 100,
-  maxConcurrentSpawns: 8,
-  log: () => {},
-  ...over,
-})
+import { MOCK, NODE, V2_PROTOCOL, command, letter, makeOpts, verdictBody } from "./helpers/checker-fixture.ts"
 
 test("valid v2 envelope passes through", async () => {
   const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: verdictBody() })] }))
