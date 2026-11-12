@@ -80,8 +80,27 @@ type ParseOutcome = { ok: true; value: V2Result } | { ok: false; reason: string 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v)
 
-const isIdentifier = (v: unknown): v is string =>
-  typeof v === "string" && v.length >= 1 && v.length <= 128 && !/\s/u.test(v)
+// String bounds are schema maxLength/minLength bounds, which count Unicode
+// code points, while String.prototype.length and regex quantifiers count
+// UTF-16 code units — supplementary characters (e.g. emoji) would count
+// double and reject schema-valid verdicts. Every bounded string below is
+// therefore measured in code points (02 §2.7 wire bounds).
+const codePoints = (v: string): number => Array.from(v).length
+
+const isIdentifier = (v: unknown): v is string => {
+  if (typeof v !== "string") return false
+  const cps = codePoints(v)
+  return cps >= 1 && cps <= 128 && !/\s/u.test(v)
+}
+
+// vote = "<action>:<ruleId>" — the ruleId part carries the RuleId bound
+// (1..128, whitespace-free) measured in code points, not UTF-16 units.
+const isVoteEntry = (vote: string): boolean => {
+  const m = /^(allow|ask|deny):(\S*)$/u.exec(vote)
+  if (m === null) return false
+  const cps = codePoints(m[2] ?? "")
+  return cps >= 1 && cps <= 128
+}
 
 const isVerdict = (v: unknown): v is Verdict => v === "allow" || v === "ask" || v === "deny"
 
@@ -172,7 +191,7 @@ function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V
   const votes = facts.votes
   if (!Array.isArray(votes) || votes.length > 4096) return `${where_}.facts.votes invalid`
   for (const vote of votes) {
-    if (typeof vote !== "string" || !/^(allow|ask|deny):\S{1,128}$/u.test(vote)) {
+    if (typeof vote !== "string" || !isVoteEntry(vote)) {
       return `${where_}.facts.votes entry invalid`
     }
   }
@@ -414,17 +433,21 @@ export function parseV2Envelope(letter: Letter, raw: string): ParseOutcome {
   if (!Object.keys(result).every((k) => allowedResultKeys.has(k))) {
     return { ok: false, reason: "verdict.result carries unknown fields" }
   }
-  if (typeof result.invocationId !== "string" || result.invocationId.length < 1 || result.invocationId.length > 256) {
+  if (typeof result.invocationId !== "string") {
+    return { ok: false, reason: "verdict.result.invocationId invalid" }
+  }
+  const invocationCps = codePoints(result.invocationId)
+  if (invocationCps < 1 || invocationCps > 256) {
     return { ok: false, reason: "verdict.result.invocationId invalid" }
   }
   if (!isVerdict(result.verdict)) return { ok: false, reason: "verdict.result.verdict invalid" }
   let message: string | undefined
   if (result.message !== undefined) {
-    if (
-      typeof result.message !== "string" ||
-      result.message.length < 1 ||
-      result.message.length > MAX_MESSAGE_CHARS
-    ) {
+    if (typeof result.message !== "string") {
+      return { ok: false, reason: "verdict.result.message invalid" }
+    }
+    const messageCps = codePoints(result.message)
+    if (messageCps < 1 || messageCps > MAX_MESSAGE_CHARS) {
       return { ok: false, reason: "verdict.result.message invalid" }
     }
     message = result.message

@@ -161,3 +161,76 @@ test("valid v2 envelope returns the nested result to the application path", () =
     assert.equal(outcome.value.commands[0]?.ruleId, "hook/allow")
   }
 })
+
+// ── String bounds count Unicode code points, not UTF-16 units ───────────────
+// The v2 schema measures maxLength/minLength in code points; String.length and
+// regex quantifiers count UTF-16 code units, so supplementary characters (one
+// emoji = 2 units) would push schema-valid verdicts into onCheckerError.
+
+const EMOJI = "\u{1F600}"
+
+const ruleEnvelope = (ruleId: string): string =>
+  JSON.stringify({
+    protocol: V2_PROTOCOL,
+    result: {
+      invocationId: "msg:call",
+      verdict: "allow",
+      commands: [{
+        index: 0,
+        verdict: "allow",
+        ruleId,
+        classification: "static",
+        match: "argv",
+        facts: {
+          evidence: "complete",
+          reasons: ["complete"],
+          selectedProfiles: ["base"],
+          matched: [ruleId],
+          qualified: [ruleId],
+          rejected: [],
+          votes: [`allow:${ruleId}`],
+        },
+      }],
+    },
+  })
+
+test("message bounds count code points — 300 emoji (600 UTF-16 units) is valid", () => {
+  // the reported false-negative: under UTF-16 counting 300 emoji read as 600
+  // chars and a schema-valid verdict degraded through onCheckerError
+  const outcome = parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(300) }))
+  assert.equal(outcome.ok, true)
+  if (outcome.ok) assert.equal(outcome.value.message, EMOJI.repeat(300))
+})
+
+test("message at the 512 code-point boundary — 512 emoji valid, 513 invalid", () => {
+  assert.equal(parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(512) })).ok, true)
+  const over = parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(513) }))
+  assert.equal(over.ok, false)
+  assert.match(over.ok ? "" : over.reason, /message/)
+})
+
+test("ruleId and its vote entry count code points — 128 emoji valid, 129 invalid", () => {
+  // `allow:` + 128 emoji is 129 UTF-16 units: the old {1,128} quantifier and
+  // the identifier length check both rejected it although the schema allows it
+  assert.equal(parseV2Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(128))).ok, true)
+  const over = parseV2Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(129)))
+  assert.equal(over.ok, false)
+})
+
+test("invocationId counts code points — 256 emoji valid, 257 invalid", () => {
+  const id256 = EMOJI.repeat(256)
+  const letter: Letter = { ...baseLetter, invocation: { id: id256, sessionID: "ses_1" } }
+  const atBound = JSON.stringify({
+    protocol: V2_PROTOCOL,
+    result: { invocationId: id256, verdict: "allow", commands: [v2Command] },
+  })
+  assert.equal(parseV2Envelope(letter, atBound).ok, true)
+  const letterOver: Letter = { ...baseLetter, invocation: { id: EMOJI.repeat(257), sessionID: "ses_1" } }
+  const over = parseV2Envelope(letterOver, JSON.stringify({
+    protocol: V2_PROTOCOL,
+    result: { invocationId: EMOJI.repeat(257), verdict: "allow", commands: [v2Command] },
+  }))
+  assert.equal(over.ok, false)
+  // the schema bound fires before the echo check — overlong ids fail closed
+  assert.match(over.ok ? "" : over.reason, /^verdict\.result\.invocationId invalid$/)
+})
