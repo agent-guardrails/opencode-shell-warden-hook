@@ -7,8 +7,10 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
-import type { Letter, LetterVerdict, Verdict } from "./types.ts"
-import { MAX_VERDICT_BYTES, MAX_FACTS_BYTES, MAX_MESSAGE_CHARS } from "./types.ts"
+import type { Letter } from "./types.ts"
+import { MAX_VERDICT_BYTES } from "./types.ts"
+import { parseV2Envelope } from "./verdict-v2.ts"
+import type { V2Result } from "./types.ts"
 
 export interface CheckerOptions {
   command: string[]
@@ -19,7 +21,7 @@ export interface CheckerOptions {
   log: (level: "debug" | "info" | "warn" | "error", msg: string) => void
 }
 
-export type CheckerOutcome = { ok: true; verdict: LetterVerdict } | { ok: false; reason: string }
+export type CheckerOutcome = { ok: true; verdict: V2Result } | { ok: false; reason: string }
 
 // Binary pin (I8): sha256 of checker.command[0]; mismatch = fatal for every spawn.
 let pinState: "unverified" | "ok" | "mismatch" | "unreadable" = "unverified"
@@ -72,7 +74,7 @@ export class CheckerInvoker {
       child.stdout?.setEncoding("utf8")
       child.stdout?.on("data", (chunk: string) => {
         out += chunk
-        if (out.length > MAX_VERDICT_BYTES) {
+        if (Buffer.byteLength(out, "utf8") > MAX_VERDICT_BYTES) {
           try { child.kill("SIGTERM") } catch { /* already dead */ }
         }
       })
@@ -96,61 +98,13 @@ export class CheckerInvoker {
       child.on("close", (code) => {
         if (code !== 0) { done({ ok: false, reason: `checker exit ${code ?? "signal"}` }); return }
         if (out.length === 0) { done({ ok: false, reason: "checker produced no verdict" }); return }
-        const parsed = parseVerdict(letter, out)
-        done(parsed.ok ? { ok: true, verdict: parsed.value } : { ok: false, reason: parsed.reason ?? "verdict shape" })
+        // One parser, one response version (02 §2.8, ADR-0023): exact v2 only.
+        // No fallback, no v1 read — every anomaly is a checker defect.
+        const parsed = parseV2Envelope(letter, out)
+        done(parsed.ok ? { ok: true, verdict: parsed.value } : { ok: false, reason: parsed.reason })
       })
     })
   }
-}
-
-function parseVerdict(letter: Letter, raw: string): { ok: true; value: LetterVerdict } | { ok: false; reason: string } {
-  let value: unknown
-  try {
-    value = JSON.parse(raw.trim())
-  } catch (e) {
-    return { ok: false, reason: `unparseable verdict: ${e instanceof Error ? e.message.slice(0, 120) : "not json"}` }
-  }
-  if (value === null || typeof value !== "object") return { ok: false, reason: "verdict is not an object" }
-  const v = value as Record<string, unknown>
-
-  if (v.invocationId !== letter.invocation.id) return { ok: false, reason: "verdict.invocationId mismatch" }
-  const verdict = v.verdict
-  if (verdict !== "allow" && verdict !== "ask" && verdict !== "deny") return { ok: false, reason: `verdict "${String(verdict)}" invalid` }
-  if (typeof v.message !== "undefined") {
-    if (typeof v.message !== "string" || v.message.length > MAX_MESSAGE_CHARS) return { ok: false, reason: "verdict.message overbound" }
-    if (verdict === "deny" && v.message.length === 0) return { ok: false, reason: "deny without prescriptive message" }
-  } else if (verdict === "deny") {
-    return { ok: false, reason: "deny without prescriptive message" }
-  }
-
-  // commands[]: exactly one entry per letter command, indexes match.
-  const cmds = v.commands
-  if (!Array.isArray(cmds) || cmds.length !== letter.commands.length) {
-    return { ok: false, reason: "verdict.commands must cover every letter command" }
-  }
-  for (let i = 0; i < letter.commands.length; i++) {
-    const c = cmds[i]
-    if (c === null || typeof c !== "object") return { ok: false, reason: `verdict.commands[${i}] is not an object` }
-    const cv = c as Record<string, unknown>
-    if (cv.index !== letter.commands[i]?.index) return { ok: false, reason: `verdict.commands[${i}].index mismatch` }
-    if (cv.verdict !== "allow" && cv.verdict !== "ask" && cv.verdict !== "deny") {
-      return { ok: false, reason: `commands[${i}].verdict invalid` }
-    }
-    if (cv.classification !== "static" && cv.classification !== "opaque") {
-      return { ok: false, reason: `commands[${i}].classification invalid` }
-    }
-    if (cv.match !== "argv" && cv.match !== "raw") {
-      return { ok: false, reason: `commands[${i}].match invalid` }
-    }
-    if (cv.match === "raw" && cv.verdict === "allow") {
-      return { ok: false, reason: `commands[${i}].raw match cannot allow` }
-    }
-    if (cv.facts !== undefined) {
-      const bytes = JSON.stringify(cv.facts).length
-      if (bytes > MAX_FACTS_BYTES) return { ok: false, reason: `commands[${i}].facts overbound` }
-    }
-  }
-  return { ok: true, value: { invocationId: v.invocationId as string, verdict: verdict as Verdict, ...(typeof v.message === "string" ? { message: v.message } : {}) } }
 }
 
 /** Reject-budget per ruleId per session (ADR-0010 / 04 §4.2): on exhaustion the hook
