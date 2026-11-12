@@ -44,6 +44,13 @@ test("non-zero exit degrades; stdout ignored", async () => {
   assert.deepEqual(out, { ok: false, reason: "checker exit 3" })
 })
 
+test("spawn failure degrades", async () => {
+  const invoker = new CheckerInvoker(makeOpts({ command: ["/path/that/does/not/exist"] }))
+  const out = await invoker.check(letter)
+  assert.equal(out.ok, false)
+  if (!out.ok) assert.match(out.reason, /spawn failure/)
+})
+
 test("non-json output degrades", async () => {
   const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: "banana" })] }))
   const out = await invoker.check(letter)
@@ -165,14 +172,13 @@ test("aggregate mismatch degrades (deny > ask > allow enforced)", async () => {
   assert.equal((await invoker.check(wideLetter)).ok, false)
 })
 
-test("timeout degrades (SIGTERM densify is the checker's problem)", async () => {
+test("timeout degrades", async () => {
   const invoker = new CheckerInvoker(makeOpts({
     command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: verdictBody(), sleepMs: 1_000 })],
     checkTimeoutMs: 150, killGraceMs: 50,
   }))
   const out = await invoker.check(letter)
-  assert.equal(out.ok, false)
-  assert.match(out.ok === false ? out.reason : "", /exit/)
+  assert.deepEqual(out, { ok: false, reason: "checker timed out" })
 })
 
 test("empty stdout degrades", async () => {

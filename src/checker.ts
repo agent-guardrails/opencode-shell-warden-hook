@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
+import { TextDecoder } from "node:util"
 import type { Letter } from "./types.ts"
 import { MAX_VERDICT_BYTES } from "./types.ts"
 import { parseV2Envelope } from "./verdict-v2.ts"
@@ -65,39 +66,67 @@ export class CheckerInvoker {
         stdio: ["pipe", "pipe", "pipe"],
       })
 
-      let out = ""
-      const kill = setTimeout(() => {
-        child.kill("SIGTERM")
-        setTimeout(() => { try { child.kill("SIGKILL") } catch { /* already dead */ } }, killGraceMs)
-      }, checkTimeoutMs)
-
-      child.stdout?.setEncoding("utf8")
-      child.stdout?.on("data", (chunk: string) => {
-        out += chunk
-        if (Buffer.byteLength(out, "utf8") > MAX_VERDICT_BYTES) {
-          try { child.kill("SIGTERM") } catch { /* already dead */ }
-        }
-      })
-
-      child.on("error", (err) => {
-        clearTimeout(kill)
-        resolve({ ok: false, reason: `spawn failure: ${err.message}` })
-      })
-      child.stdin?.on("error", () => { /* EPIPE on early exit — close handler decides */ })
-      child.stdio[2]?.on("data", (chunk: string) => log("debug", `checker: ${String(chunk).trim()}`))
-
-      child.stdin?.end(JSON.stringify(letter))
-
+      const output = Buffer.allocUnsafe(MAX_VERDICT_BYTES)
+      let retainedBytes = 0
       let settled = false
+      let anomaly: { readonly ok: false; readonly reason: string } | undefined
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+      let killTimer: ReturnType<typeof setTimeout> | undefined
       const done = (o: CheckerOutcome) => {
         if (settled) return
         settled = true
-        clearTimeout(kill)
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+        if (killTimer !== undefined) clearTimeout(killTimer)
         resolve(o)
       }
+      const terminate = (reason: string) => {
+        if (anomaly !== undefined) return
+        anomaly = { ok: false, reason }
+        child.kill("SIGTERM")
+        killTimer = setTimeout(() => { child.kill("SIGKILL") }, killGraceMs)
+      }
+
+      deadlineTimer = setTimeout(() => { terminate("checker timed out") }, checkTimeoutMs)
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (anomaly !== undefined) return
+        const available = MAX_VERDICT_BYTES - retainedBytes
+        if (chunk.length <= available) {
+          chunk.copy(output, retainedBytes)
+          retainedBytes += chunk.length
+          return
+        }
+        if (available > 0) {
+          chunk.copy(output, retainedBytes, 0, available)
+          retainedBytes += available
+        }
+        terminate("verdict exceeds the 64 KiB output bound")
+      })
+
+      child.on("error", (err) => {
+        if (anomaly !== undefined) {
+          log("debug", `checker termination error: ${err.message}`)
+          return
+        }
+        done({ ok: false, reason: `spawn failure: ${err.message}` })
+      })
+      child.stdin?.on("error", () => { /* EPIPE on early exit — close handler decides */ })
+      child.stdio[2]?.on("data", (chunk: Buffer) => log("debug", `checker: ${String(chunk).trim()}`))
+
+      child.stdin?.end(JSON.stringify(letter))
+
       child.on("close", (code) => {
+        if (anomaly !== undefined) { done(anomaly); return }
         if (code !== 0) { done({ ok: false, reason: `checker exit ${code ?? "signal"}` }); return }
-        if (out.length === 0) { done({ ok: false, reason: "checker produced no verdict" }); return }
+        if (retainedBytes === 0) { done({ ok: false, reason: "checker produced no verdict" }); return }
+        let out: string
+        try {
+          out = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(output.subarray(0, retainedBytes))
+        } catch (error) {
+          if (!(error instanceof TypeError)) throw error
+          done({ ok: false, reason: "checker produced invalid UTF-8" })
+          return
+        }
         // One parser, one response version (02 §2.8, ADR-0023): exact v2 only.
         // No fallback, no v1 read — every anomaly is a checker defect.
         const parsed = parseV2Envelope(letter, out)
