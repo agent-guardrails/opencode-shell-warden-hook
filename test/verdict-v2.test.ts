@@ -162,6 +162,59 @@ test("valid v2 envelope returns the nested result to the application path", () =
   }
 })
 
+// ── Letter positional index validation (02 §2.8) ────────────────────────────
+// The expected letter context carries contiguous positional indexes 0..N-1
+// equal to their array positions; a malformed letter must fail closed before
+// any result-command comparison (no checker output may rescue it).
+
+const letterWithIndexes = (...indexes: number[]): Letter => ({
+  version: 1,
+  invocation: { id: "msg:call", sessionID: "ses_1" },
+  action: "shell",
+  commands: indexes.map((index) => ({ index, raw: "git status", cwd: "/repo" })),
+})
+
+const twoCommandBody = (): string =>
+  JSON.stringify({
+    protocol: V2_PROTOCOL,
+    result: {
+      invocationId: "msg:call",
+      verdict: "allow",
+      commands: [
+        { index: 0, verdict: "allow", classification: "static", match: "argv" },
+        { index: 1, verdict: "allow", classification: "static", match: "argv" },
+      ],
+    },
+  })
+
+test("contiguous letter indexes validate against the matching result", () => {
+  assert.equal(parseV2Envelope(letterWithIndexes(0, 1), twoCommandBody()).ok, true)
+})
+
+test("duplicate letter command index fails closed", () => {
+  const outcome = parseV2Envelope(letterWithIndexes(0, 0), twoCommandBody())
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[1\]\.index/)
+})
+
+test("skipped letter command index fails closed", () => {
+  const outcome = parseV2Envelope(letterWithIndexes(0, 2), twoCommandBody())
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[1\]\.index/)
+})
+
+test("negative letter command index fails closed", () => {
+  const outcome = parseV2Envelope(letterWithIndexes(-1), twoCommandBody())
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[0\]\.index/)
+})
+
+test("out-of-position letter command index fails closed", () => {
+  const outcome = parseV2Envelope(letterWithIndexes(1, 0), twoCommandBody())
+  assert.equal(outcome.ok, false)
+  assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[0\]\.index/)
+})
+
 // ── String bounds count Unicode code points, not UTF-16 units ───────────────
 // The v2 schema measures maxLength/minLength in code points; String.length and
 // regex quantifiers count UTF-16 code units, so supplementary characters (one
