@@ -268,6 +268,16 @@ function parseCommand(raw: unknown, position: number): V2CommandVerdict | string
 
 function semanticErrors(result: V2Result, letter: Letter): string[] {
   const errors: string[] = []
+  // The expected letter context is validated before any result-command
+  // comparison (02 §2.8): contiguous positional indexes 0..N-1 equal to their
+  // array positions — duplicate, skipped, negative, or out-of-position
+  // indexes are contract anomalies and fail closed (#22). Letter errors are
+  // pushed first so they are also reported first.
+  letter.commands.forEach((command, position) => {
+    if (command.index !== position) {
+      errors.push(`letter.commands[${position}].index must equal its array position`)
+    }
+  })
   if (result.invocationId !== letter.invocation.id) {
     errors.push("result.invocationId does not echo the letter invocation id")
   }
