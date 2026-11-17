@@ -1,29 +1,21 @@
-// Verdict v2 hook conformance — consumes all and only the shared-manifest
-// `hook-consumer` vectors (HANDOFF-verdict-v2 §Hook 4, 10 §10.8), plus the
-// hook-specific anomaly requirements: flat v1 rejection, absent/unknown/
-// non-string protocol, malformed v2 without any v1 fallback, and the 64 KiB
-// pre-parse cap.
-//
-// Fixture provenance: byte-identical copy of docs schemas/fixtures/
-// shell-warden.verdict.v2 at docs@a5480bd (contract PR #34, ADR-0023).
+// Active v3 hook conformance: canonical shared vectors plus hook-boundary
+// anomalies. Historical versions are rejected, never read as a fallback.
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { parseV2Envelope, V2_PROTOCOL } from "../src/verdict-v2.ts"
+import { parseV3Envelope, V3_PROTOCOL } from "../src/verdict-v3.ts"
 import type { Letter } from "../src/types.ts"
 import { MAX_VERDICT_BYTES } from "../src/types.ts"
 
-const FIXTURES = new URL("./verdict-v2/", import.meta.url)
+const FIXTURES = new URL("./verdict-v3/", import.meta.url)
 
 interface Vector {
   path: string
-  roles: string[]
-  phase: string
+  valid: boolean
   expectedInvocationId: string
   positionalIndexes: number[]
-  expectedError: Record<string, unknown> | null
 }
 
 function manifest(): Vector[] {
@@ -41,33 +33,22 @@ function letterFor(vector: Vector): Letter {
   }
 }
 
-test("every hook-consumer vector is consumed with its pinned phase outcome", () => {
+test("every shared v3 vector is consumed without a version fallback", () => {
   const vectors = manifest()
-  // all consumer-rejection vectors are hook-consumer only: none may be skipped
-  const consumerRejections = vectors.filter((v) => v.phase === "consumer-rejection")
-  assert.ok(consumerRejections.length >= 1, "the flat v1 rejection vector must exist")
+  assert.ok(vectors.length >= 50)
   let consumed = 0
   for (const vector of vectors) {
-    if (!vector.roles.includes("hook-consumer")) continue
     consumed += 1
     const text = readFileSync(new URL(vector.path, FIXTURES), "utf8")
-    const outcome = parseV2Envelope(letterFor(vector), text)
-    if (vector.phase === "valid") {
+    const outcome = parseV3Envelope(letterFor(vector), text)
+    if (vector.valid) {
       assert.equal(outcome.ok, true, `${vector.path} must validate: ${JSON.stringify(outcome)}`)
       if (outcome.ok) assert.equal(outcome.value.invocationId, vector.expectedInvocationId)
     } else {
-      assert.equal(outcome.ok, false, `${vector.path} (${vector.phase}) must fail closed`)
+      assert.equal(outcome.ok, false, `${vector.path} must fail closed`)
     }
   }
-  assert.equal(consumed, vectors.length, "every manifest vector has the hook-consumer role")
-})
-
-test("checker-producer-only phases are not skipped by the role filter", () => {
-  const vectors = manifest()
-  // schema-phase and semantic-phase vectors carry hook-consumer too (roles
-  // are multi-role) — this guards against dropping them from the hook run
-  assert.ok(vectors.some((v) => v.phase === "schema" && v.roles.includes("hook-consumer")))
-  assert.ok(vectors.some((v) => v.phase === "semantic" && v.roles.includes("hook-consumer")))
+  assert.equal(consumed, vectors.length)
 })
 
 // ── Hook-specific anomaly requirements ──────────────────────────────────────
@@ -79,13 +60,14 @@ const baseLetter: Letter = {
   commands: [{ index: 0, raw: "git status", cwd: "/repo" }],
 }
 
-const v2Command = {
+const v3Command = {
   index: 0,
   verdict: "allow",
   ruleId: "hook/allow",
   classification: "static",
   match: "argv",
   facts: {
+    uncertain: [],
     evidence: "complete",
     reasons: ["complete"],
     selectedProfiles: ["base"],
@@ -96,13 +78,13 @@ const v2Command = {
   },
 }
 
-const v2Body = (over: Record<string, unknown> = {}): string =>
+const v3Body = (over: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "allow",
-      commands: [v2Command],
+      commands: [v3Command],
       ...over,
     },
   })
@@ -113,30 +95,30 @@ test("flat v1 response (even exact-valid) is rejected without fallback", () => {
     verdict: "allow",
     commands: [{ index: 0, verdict: "allow", ruleId: "hook/allow", classification: "static", match: "argv" }],
   })
-  const outcome = parseV2Envelope(baseLetter, flatV1)
+  const outcome = parseV3Envelope(baseLetter, flatV1)
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /protocol/)
 })
 
 test("absent protocol is an anomaly", () => {
-  const body = JSON.stringify({ result: JSON.parse(v2Body()).result })
-  assert.equal(parseV2Envelope(baseLetter, body).ok, false)
+  const body = JSON.stringify({ result: JSON.parse(v3Body()).result })
+  assert.equal(parseV3Envelope(baseLetter, body).ok, false)
 })
 
 test("unknown protocol is an anomaly", () => {
-  const body = v2Body().replace(V2_PROTOCOL, "shell-warden.verdict.v3")
-  assert.equal(parseV2Envelope(baseLetter, body).ok, false)
+  const body = v3Body().replace(V3_PROTOCOL, "shell-warden.verdict.v4")
+  assert.equal(parseV3Envelope(baseLetter, body).ok, false)
 })
 
 test("non-string protocol is an anomaly", () => {
-  const body = v2Body().replace(`"protocol":"${V2_PROTOCOL}"`, '"protocol":42')
-  assert.equal(parseV2Envelope(baseLetter, body).ok, false)
+  const body = v3Body().replace(`"protocol":"${V3_PROTOCOL}"`, '"protocol":42')
+  assert.equal(parseV3Envelope(baseLetter, body).ok, false)
 })
 
-test("malformed v2 never falls back to a v1 read", () => {
-  // a v2 envelope whose nested result was dropped cannot be re-read as flat v1
-  const body = JSON.stringify({ protocol: V2_PROTOCOL })
-  const outcome = parseV2Envelope(baseLetter, body)
+test("malformed v3 never falls back to a retired read", () => {
+  // An envelope with a missing result cannot be re-read as a retired format.
+  const body = JSON.stringify({ protocol: V3_PROTOCOL })
+  const outcome = parseV3Envelope(baseLetter, body)
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /result/)
 })
@@ -144,17 +126,17 @@ test("malformed v2 never falls back to a v1 read", () => {
 test("oversize output fails the 64 KiB cap before JSON parsing", () => {
   const filler = "x".repeat(MAX_VERDICT_BYTES)
   const oversize = JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: { invocationId: "msg:call", verdict: "ask", commands: [{ index: 0, verdict: "ask", classification: "invalid", match: "raw" }], message: filler },
   })
   assert.ok(Buffer.byteLength(oversize, "utf8") > MAX_VERDICT_BYTES)
-  const outcome = parseV2Envelope(baseLetter, oversize)
+  const outcome = parseV3Envelope(baseLetter, oversize)
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /64 KiB/)
 })
 
-test("valid v2 envelope returns the nested result to the application path", () => {
-  const outcome = parseV2Envelope(baseLetter, v2Body())
+test("valid v3 envelope returns the nested result to the application path", () => {
+  const outcome = parseV3Envelope(baseLetter, v3Body())
   assert.equal(outcome.ok, true)
   if (outcome.ok) {
     assert.equal(outcome.value.verdict, "allow")
@@ -176,7 +158,7 @@ const letterWithIndexes = (...indexes: number[]): Letter => ({
 
 const twoCommandBody = (): string =>
   JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "allow",
@@ -188,29 +170,29 @@ const twoCommandBody = (): string =>
   })
 
 test("contiguous letter indexes validate against the matching result", () => {
-  assert.equal(parseV2Envelope(letterWithIndexes(0, 1), twoCommandBody()).ok, true)
+  assert.equal(parseV3Envelope(letterWithIndexes(0, 1), twoCommandBody()).ok, true)
 })
 
 test("duplicate letter command index fails closed", () => {
-  const outcome = parseV2Envelope(letterWithIndexes(0, 0), twoCommandBody())
+  const outcome = parseV3Envelope(letterWithIndexes(0, 0), twoCommandBody())
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[1\]\.index/)
 })
 
 test("skipped letter command index fails closed", () => {
-  const outcome = parseV2Envelope(letterWithIndexes(0, 2), twoCommandBody())
+  const outcome = parseV3Envelope(letterWithIndexes(0, 2), twoCommandBody())
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[1\]\.index/)
 })
 
 test("negative letter command index fails closed", () => {
-  const outcome = parseV2Envelope(letterWithIndexes(-1), twoCommandBody())
+  const outcome = parseV3Envelope(letterWithIndexes(-1), twoCommandBody())
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[0\]\.index/)
 })
 
 test("out-of-position letter command index fails closed", () => {
-  const outcome = parseV2Envelope(letterWithIndexes(1, 0), twoCommandBody())
+  const outcome = parseV3Envelope(letterWithIndexes(1, 0), twoCommandBody())
   assert.equal(outcome.ok, false)
   assert.match(outcome.ok ? "" : outcome.reason, /letter\.commands\[0\]\.index/)
 })
@@ -224,7 +206,7 @@ const EMOJI = "\u{1F600}"
 
 const ruleEnvelope = (ruleId: string): string =>
   JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "allow",
@@ -235,6 +217,7 @@ const ruleEnvelope = (ruleId: string): string =>
         classification: "static",
         match: "argv",
         facts: {
+          uncertain: [],
           evidence: "complete",
           reasons: ["complete"],
           selectedProfiles: ["base"],
@@ -250,14 +233,14 @@ const ruleEnvelope = (ruleId: string): string =>
 test("message bounds count code points — 300 emoji (600 UTF-16 units) is valid", () => {
   // the reported false-negative: under UTF-16 counting 300 emoji read as 600
   // chars and a schema-valid verdict degraded through onCheckerError
-  const outcome = parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(300) }))
+  const outcome = parseV3Envelope(baseLetter, v3Body({ message: EMOJI.repeat(300) }))
   assert.equal(outcome.ok, true)
   if (outcome.ok) assert.equal(outcome.value.message, EMOJI.repeat(300))
 })
 
 test("message at the 512 code-point boundary — 512 emoji valid, 513 invalid", () => {
-  assert.equal(parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(512) })).ok, true)
-  const over = parseV2Envelope(baseLetter, v2Body({ message: EMOJI.repeat(513) }))
+  assert.equal(parseV3Envelope(baseLetter, v3Body({ message: EMOJI.repeat(512) })).ok, true)
+  const over = parseV3Envelope(baseLetter, v3Body({ message: EMOJI.repeat(513) }))
   assert.equal(over.ok, false)
   assert.match(over.ok ? "" : over.reason, /message/)
 })
@@ -265,8 +248,8 @@ test("message at the 512 code-point boundary — 512 emoji valid, 513 invalid", 
 test("ruleId and its vote entry count code points — 128 emoji valid, 129 invalid", () => {
   // `allow:` + 128 emoji is 129 UTF-16 units: the old {1,128} quantifier and
   // the identifier length check both rejected it although the schema allows it
-  assert.equal(parseV2Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(128))).ok, true)
-  const over = parseV2Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(129)))
+  assert.equal(parseV3Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(128))).ok, true)
+  const over = parseV3Envelope(baseLetter, ruleEnvelope(EMOJI.repeat(129)))
   assert.equal(over.ok, false)
 })
 
@@ -274,14 +257,14 @@ test("invocationId counts code points — 256 emoji valid, 257 invalid", () => {
   const id256 = EMOJI.repeat(256)
   const letter: Letter = { ...baseLetter, invocation: { id: id256, sessionID: "ses_1" } }
   const atBound = JSON.stringify({
-    protocol: V2_PROTOCOL,
-    result: { invocationId: id256, verdict: "allow", commands: [v2Command] },
+    protocol: V3_PROTOCOL,
+    result: { invocationId: id256, verdict: "allow", commands: [v3Command] },
   })
-  assert.equal(parseV2Envelope(letter, atBound).ok, true)
+  assert.equal(parseV3Envelope(letter, atBound).ok, true)
   const letterOver: Letter = { ...baseLetter, invocation: { id: EMOJI.repeat(257), sessionID: "ses_1" } }
-  const over = parseV2Envelope(letterOver, JSON.stringify({
-    protocol: V2_PROTOCOL,
-    result: { invocationId: EMOJI.repeat(257), verdict: "allow", commands: [v2Command] },
+  const over = parseV3Envelope(letterOver, JSON.stringify({
+    protocol: V3_PROTOCOL,
+    result: { invocationId: EMOJI.repeat(257), verdict: "allow", commands: [v3Command] },
   }))
   assert.equal(over.ok, false)
   // the schema bound fires before the echo check — overlong ids fail closed
