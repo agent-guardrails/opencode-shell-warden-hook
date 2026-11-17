@@ -10,8 +10,8 @@ import { readFileSync } from "node:fs"
 import { TextDecoder } from "node:util"
 import type { Letter } from "./types.ts"
 import { MAX_VERDICT_BYTES } from "./types.ts"
-import { parseV2Envelope } from "./verdict-v2.ts"
-import type { V2Result } from "./types.ts"
+import { parseV3Envelope } from "./verdict-v3.ts"
+import type { V3Result } from "./types.ts"
 
 export interface CheckerOptions {
   command: string[]
@@ -22,7 +22,7 @@ export interface CheckerOptions {
   log: (level: "debug" | "info" | "warn" | "error", msg: string) => void
 }
 
-export type CheckerOutcome = { ok: true; verdict: V2Result } | { ok: false; reason: string }
+export type CheckerOutcome = { ok: true; verdict: V3Result } | { ok: false; reason: string }
 
 // Binary pin (I8): sha256 of checker.command[0]; mismatch = fatal for every spawn.
 let pinState: "unverified" | "ok" | "mismatch" | "unreadable" = "unverified"
@@ -127,9 +127,9 @@ export class CheckerInvoker {
           done({ ok: false, reason: "checker produced invalid UTF-8" })
           return
         }
-        // One parser, one response version (02 §2.8, ADR-0023): exact v2 only.
+        // One parser, one response version (12 §12.6, ADR-0026): exact v3 only.
         // No fallback, no v1 read — every anomaly is a checker defect.
-        const parsed = parseV2Envelope(letter, out)
+        const parsed = parseV3Envelope(letter, out)
         done(parsed.ok ? { ok: true, verdict: parsed.value } : { ok: false, reason: parsed.reason })
       })
     })

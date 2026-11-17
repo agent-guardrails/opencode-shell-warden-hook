@@ -1,7 +1,7 @@
 // Letter & verdict types — mirror of docs/spec/shell-warden/02-letter-verdict.md
-// (v2.2) and schemas/shell-warden.letter.v1.schema.json (letter only). The
-// response contract is the closed verdict v2 envelope
-// (schemas/shell-warden.verdict.v2.schema.json, ADR-0023): see verdict-v2.ts.
+// and schemas/shell-warden.letter.v1.schema.json (letter only). The
+// response contract is the closed verdict v3 envelope
+// (schemas/shell-warden.verdict.v3.schema.json, ADR-0026): see verdict-v3.ts.
 // Keep in sync with the schemas.
 
 export type Verdict = "allow" | "ask" | "deny"
@@ -26,54 +26,55 @@ export interface Letter {
   commands: LetterCommand[]
 }
 
-// ── Verdict v2 response contract (02 §2.7/§2.8, ADR-0023) ───────────────────
+// ── Verdict v3 response contract (02 §2.10, ADR-0026) ──────────────────────
 
-export type V2Evidence = "complete" | "opaque" | "invalid"
-export type V2Classification = "static" | "opaque" | "invalid"
-export type V2Match = "argv" | "raw"
+export type V3Evidence = "complete" | "parameter" | "opaque" | "invalid"
+export type V3Classification = "static" | "parameter" | "opaque" | "invalid"
+export type V3Match = "argv" | "expression" | "raw"
 
-export interface V2RejectedAllow {
+export interface V3RejectedAllow {
   ruleId: string
   reasons: string[]                // closed coverage vocabulary, sorted + unique
 }
 
-export interface V2FullDiagnostics {
-  evidence: V2Evidence
+export interface V3FullDiagnostics {
+  uncertain: Array<{ ruleId: string; predicates: string[] }>
+  evidence: V3Evidence
   reasons: string[]                // closed reason vocabulary, sorted + unique
   selectedProfiles: string[]
   matched: string[]                // sorted + unique
   qualified: string[]              // sorted + unique, ⊆ matched, each with an allow vote
-  rejected: V2RejectedAllow[]      // one canonical entry per ruleId
+  rejected: V3RejectedAllow[]      // one canonical entry per ruleId
   votes: string[]                  // emitted votes "{action}:{ruleId}" in evaluation order
 }
 
-export interface V2TruncatedDiagnostics {
-  evidence: V2Evidence
+export interface V3TruncatedDiagnostics {
+  evidence: V3Evidence
   reasons: string[]                // ≤ 8, sorted + unique, evidence anchor retained
   diagnostics: "truncated-after-decision"
 }
 
-export type V2Diagnostics = V2FullDiagnostics | V2TruncatedDiagnostics
+export type V3Diagnostics = V3FullDiagnostics | V3TruncatedDiagnostics
 
-export interface V2CommandVerdict {
+export interface V3CommandVerdict {
   index: number                    // equal to its commands[] array position
   verdict: Verdict
   ruleId?: string                  // required on deny; UTF-8-smallest winning vote
-  classification: V2Classification
-  match: V2Match
-  facts?: V2Diagnostics
+  classification: V3Classification
+  match: V3Match
+  facts?: V3Diagnostics
 }
 
-export interface V2Result {
+export interface V3Result {
   invocationId: string             // echo of letter.invocation.id
   verdict: Verdict                 // most-restrictive command verdict (deny > ask > allow)
   message?: string                 // required on deny; ≤ 512 chars; ignored for allow/ask
-  commands: V2CommandVerdict[]
+  commands: V3CommandVerdict[]
 }
 
-export interface V2Envelope {
-  protocol: "shell-warden.verdict.v2"
-  result: V2Result
+export interface V3Envelope {
+  protocol: "shell-warden.verdict.v3"
+  result: V3Result
 }
 
 // Bounds from 02-letter-verdict.md §2.2/§2.7 (hook enforces before spawning)

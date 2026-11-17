@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  paired-checker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+      - name: Checkout paired v3 checker
+        uses: actions/checkout@v4
+        with:
+          repository: agent-guardrails/shell-warden
+          ref: a6d53b11e9e99d628aefda470eb49c1f413abcaa
+          path: paired-checker
+          persist-credentials: false
+      - name: Checkout canonical v3 contract
+        uses: actions/checkout@v4
+        with:
+          repository: agent-guardrails/docs
+          ref: aa13e83b2e5ff8f34518160c0c5e13704cf3ef4c
+          path: contract-docs
+          persist-credentials: false
+      - name: Verify canonical verdict mirror
+        run: >-
+          node contract-docs/scripts/generate-shell-warden-v3.mjs --check
+          --mirror=${{ github.workspace }}/test/verdict-v3
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - name: Build paired checker
+        run: cargo +stable build --manifest-path paired-checker/Cargo.toml --locked
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Unit, shared-contract, and real permission-event tests
+        env:
+          SHELL_WARDEN_TEST_BINARY: ${{ github.workspace }}/paired-checker/target/debug/shell-warden
+        run: npm test

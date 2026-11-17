@@ -4,7 +4,7 @@ import { CheckerInvoker, RejectBudgets, verifyPin } from "../src/checker.ts"
 import type { Letter } from "../src/types.ts"
 import { MAX_VERDICT_BYTES } from "../src/types.ts"
 import { writeFileSync } from "node:fs"
-import { MOCK, NODE, V2_PROTOCOL, command, letter, makeOpts, verdictBody } from "./helpers/checker-fixture.ts"
+import { MOCK, NODE, V3_PROTOCOL, command, letter, makeOpts, verdictBody } from "./helpers/checker-fixture.ts"
 
 test("valid v2 envelope passes through", async () => {
   const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: verdictBody() })] }))
@@ -86,7 +86,7 @@ test("flat v1 response degrades — no v1 read, no fallback (ADR-0023)", async (
 })
 
 test("unknown and non-string protocol degrade", async () => {
-  for (const protocol of ["shell-warden.verdict.v3", 42]) {
+  for (const protocol of ["shell-warden.verdict.v2", "shell-warden.verdict.v4", 42]) {
     const body = JSON.stringify({ protocol, result: JSON.parse(verdictBody()).result })
     const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
     assert.equal((await invoker.check(letter)).ok, false, `protocol ${String(protocol)}`)
@@ -95,7 +95,7 @@ test("unknown and non-string protocol degrade", async () => {
 
 test("malformed v2 degrades without falling back to v1", async () => {
   // valid flat v1 nested inside a v2 envelope is still an anomaly
-  const body = JSON.stringify({ protocol: V2_PROTOCOL, invocationId: "msg:call", verdict: "allow" })
+  const body = JSON.stringify({ protocol: V3_PROTOCOL, invocationId: "msg:call", verdict: "allow" })
   const invoker = new CheckerInvoker(makeOpts({ command: [NODE, MOCK, "--behavior", JSON.stringify({ stdout: body })] }))
   const out = await invoker.check(letter)
   assert.equal(out.ok, false)
@@ -119,7 +119,7 @@ test("impossible v2 tuples degrade (invalid allow, opaque allow, raw allow)", as
 test("oversize output degrades at the pre-parse 64 KiB cap", async () => {
   const filler = "x".repeat(MAX_VERDICT_BYTES)
   const body = JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "ask",
@@ -135,7 +135,7 @@ test("oversize output degrades at the pre-parse 64 KiB cap", async () => {
 
 test("commands count mismatch degrades", async () => {
   const body = JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "allow",
@@ -149,7 +149,7 @@ test("commands count mismatch degrades", async () => {
 test("aggregate mismatch degrades (deny > ask > allow enforced)", async () => {
   // command verdicts allow + ask must aggregate to ask, not allow
   const body = JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: {
       invocationId: "msg:call",
       verdict: "allow",
