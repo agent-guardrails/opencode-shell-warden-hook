@@ -28,7 +28,8 @@ test("parameter permissions complete a real-checker hook round trip", {
     const profile = (name: string, restrictive: boolean) => ({
       id: name, executables: [name], options: {}, analyzer: "generic-v1",
       pathSources: [{ argument: { index: 0, remainder: true } }],
-      rules: [allow, ...(restrictive ? [{
+      // This peer fails parameter coverage, but must not veto a qualified allow.
+      rules: [{ ...allow, id: "no-grant", expansions: { arguments: [] } }, allow, ...(restrictive ? [{
         id: "secret", action: "deny", message: "Restricted path.",
         match: { paths: { any: [{ coordinate: { argument: { index: 0, remainder: true } }, within: "/secret" }] } },
       }] : [])],
