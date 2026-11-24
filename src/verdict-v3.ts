@@ -1,10 +1,10 @@
-// Verdict v2 consumer — the closed response parser (02-letter-verdict.md
-// §2.7/§2.8, ADR-0023: verdict v2 only).
+// Verdict v3 consumer — the closed response parser (02-letter-verdict.md
+// §2.10, ADR-0026: contextual parameter evidence).
 //
 // One parser, one response version: the hook accepts ONLY the exact
-// `shell-warden.verdict.v2` envelope. A flat v1 response, an absent, unknown,
+// `shell-warden.verdict.v3` envelope. Retired v1/v2 responses, an absent, unknown,
 // non-string, or malformed `protocol`, a schema-violating or semantically
-// invalid v2 result, and oversize output are checker anomalies (§2.8): the
+// invalid v3 result, and oversize output are checker anomalies (§2.10): the
 // caller degrades through `onCheckerError`. There is no v1 parser, no
 // fallback, no translation, and allow is never synthesized.
 //
@@ -20,20 +20,22 @@ import {
   MAX_MESSAGE_CHARS,
   MAX_VERDICT_BYTES,
   type Letter,
-  type V2CommandVerdict,
-  type V2Diagnostics,
-  type V2Evidence,
-  type V2FullDiagnostics,
-  type V2RejectedAllow,
-  type V2Result,
-  type V2TruncatedDiagnostics,
+  type V3CommandVerdict,
+  type V3Diagnostics,
+  type V3Evidence,
+  type V3FullDiagnostics,
+  type V3RejectedAllow,
+  type V3Result,
+  type V3TruncatedDiagnostics,
   type Verdict,
 } from "./types.ts"
 
-export const V2_PROTOCOL = "shell-warden.verdict.v2"
+export const V3_PROTOCOL = "shell-warden.verdict.v3"
 
-// Closed vocabularies (07 §7.3; mirror of the v2 schema enums).
+// Closed vocabularies (12 §12.6; mirror of the v3 schema enums).
 const STABLE_REASONS: ReadonlySet<string> = new Set([
+  "parameter-expansion",
+  "predicate-unknown",
   "complete",
   "opaque-expansion",
   "unknown-option",
@@ -71,11 +73,11 @@ const COVERAGE_REASONS: ReadonlySet<string> = new Set([
   "remainder-uncovered",
   "redirect-policy-uncovered",
 ])
-const FULL_FACT_FIELDS = ["evidence", "reasons", "selectedProfiles", "matched", "qualified", "rejected", "votes"]
+const FULL_FACT_FIELDS = ["evidence", "reasons", "selectedProfiles", "matched", "qualified", "rejected", "votes", "uncertain"]
 const TRUNCATED_FACT_FIELDS = ["evidence", "reasons", "diagnostics"]
 const RESERVED_DIAGNOSTIC_KEYS = [...FULL_FACT_FIELDS, "diagnostics"]
 
-type ParseOutcome = { ok: true; value: V2Result } | { ok: false; reason: string }
+type ParseOutcome = { ok: true; value: V3Result } | { ok: false; reason: string }
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v)
@@ -107,6 +109,12 @@ const isVerdict = (v: unknown): v is Verdict => v === "allow" || v === "ask" || 
 const rank = (v: Verdict): number => (v === "deny" ? 2 : v === "ask" ? 1 : 0)
 
 const isInvalidCause = (r: string): boolean => INVALID_REASONS.has(r)
+
+function isPredicateCoordinate(value: unknown): value is string {
+  return typeof value === "string" && codePoints(value) <= 256 &&
+    Number(value.split("/")[2]) <= 0xffffffff &&
+    /^\/parts\/[0-9]+\/match\/(arguments|options|environment|redirects|paths|facts|nestedParts)(\/[^\s/]+)*$/u.test(value)
+}
 
 function utf8Less(a: string, b: string): boolean {
   return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")) < 0
@@ -141,9 +149,9 @@ function jsonDepth(value: unknown, stop = Number.POSITIVE_INFINITY): number {
 
 // ── Closed schema-equivalent validation ─────────────────────────────────────
 
-function parseDiagnostics(facts: unknown, where_: string): V2Diagnostics | string {
+function parseDiagnostics(facts: unknown, where_: string): V3Diagnostics | string {
   if (!isObject(facts)) return `${where_}.facts must be an object`
-  // recognized full or truncated shape — v2 has no legacy-opaque pass-through
+  // recognized full or truncated shape — no legacy-opaque pass-through
   if (exactKeys(facts, FULL_FACT_FIELDS)) return parseFullDiagnostics(facts, where_)
   if (exactKeys(facts, TRUNCATED_FACT_FIELDS)) return parseTruncatedDiagnostics(facts, where_)
   const reserved = Object.keys(facts).some((k) => RESERVED_DIAGNOSTIC_KEYS.includes(k))
@@ -152,15 +160,15 @@ function parseDiagnostics(facts: unknown, where_: string): V2Diagnostics | strin
     : `${where_}.facts is not a recognized diagnostics shape`
 }
 
-function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V2FullDiagnostics | string {
+function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V3FullDiagnostics | string {
   const evidence = facts.evidence
-  if (evidence !== "complete" && evidence !== "opaque" && evidence !== "invalid") {
+  if (evidence !== "complete" && evidence !== "parameter" && evidence !== "opaque" && evidence !== "invalid") {
     return `${where_}.facts.evidence invalid`
   }
   const reasons = facts.reasons
   if (
     !Array.isArray(reasons) ||
-    reasons.length > 17 ||
+    reasons.length > 19 ||
     !reasons.every((r) => typeof r === "string" && STABLE_REASONS.has(r))
   ) {
     return `${where_}.facts.reasons invalid`
@@ -170,7 +178,7 @@ function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V
   if (!identifierArray(facts.selectedProfiles, 1024, false)) return `${where_}.facts.selectedProfiles invalid`
   if (!identifierArray(facts.matched, 4096, false)) return `${where_}.facts.matched invalid`
   if (!identifierArray(facts.qualified, 4096, true)) return `${where_}.facts.qualified invalid`
-  const rejected: V2RejectedAllow[] = []
+  const rejected: V3RejectedAllow[] = []
   const rawRejected = facts.rejected
   if (!Array.isArray(rawRejected) || rawRejected.length > 4096) return `${where_}.facts.rejected invalid`
   for (const entry of rawRejected) {
@@ -189,6 +197,14 @@ function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V
     rejected.push({ ruleId: entry.ruleId, reasons: entry.reasons })
   }
   const votes = facts.votes
+  const uncertain = facts.uncertain
+  if (!Array.isArray(uncertain) || uncertain.length > 4096 ||
+      !uncertain.every((entry) => isObject(entry) && exactKeys(entry, ["ruleId", "predicates"]) &&
+        isIdentifier(entry.ruleId) && Array.isArray(entry.predicates) &&
+        entry.predicates.length >= 1 && entry.predicates.length <= 4096 &&
+        entry.predicates.every(isPredicateCoordinate))) {
+    return `${where_}.facts.uncertain invalid`
+  }
   if (!Array.isArray(votes) || votes.length > 4096) return `${where_}.facts.votes invalid`
   for (const vote of votes) {
     if (typeof vote !== "string" || !isVoteEntry(vote)) {
@@ -196,6 +212,7 @@ function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V
     }
   }
   return {
+    uncertain: uncertain as V3FullDiagnostics["uncertain"],
     evidence,
     reasons: reasons as string[],
     selectedProfiles: facts.selectedProfiles as string[],
@@ -209,9 +226,9 @@ function parseFullDiagnostics(facts: Record<string, unknown>, where_: string): V
 function parseTruncatedDiagnostics(
   facts: Record<string, unknown>,
   where_: string,
-): V2TruncatedDiagnostics | string {
+): V3TruncatedDiagnostics | string {
   const evidence = facts.evidence
-  if (evidence !== "complete" && evidence !== "opaque" && evidence !== "invalid") {
+  if (evidence !== "complete" && evidence !== "parameter" && evidence !== "opaque" && evidence !== "invalid") {
     return `${where_}.facts.evidence invalid`
   }
   const reasons = facts.reasons
@@ -228,7 +245,7 @@ function parseTruncatedDiagnostics(
   return { evidence, reasons, diagnostics: "truncated-after-decision" }
 }
 
-function parseCommand(raw: unknown, position: number): V2CommandVerdict | string {
+function parseCommand(raw: unknown, position: number): V3CommandVerdict | string {
   const where_ = `commands[${position}]`
   if (!isObject(raw)) return `${where_} is not an object`
   const allowedCommandKeys = new Set(["index", "verdict", "classification", "match", "ruleId", "facts"])
@@ -239,14 +256,15 @@ function parseCommand(raw: unknown, position: number): V2CommandVerdict | string
   if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return `${where_}.index invalid`
   if (!isVerdict(raw.verdict)) return `${where_}.verdict invalid`
   const classification = raw.classification
-  if (classification !== "static" && classification !== "opaque" && classification !== "invalid") {
+  if (classification !== "static" && classification !== "parameter" && classification !== "opaque" && classification !== "invalid") {
     return `${where_}.classification invalid`
   }
   const match = raw.match
-  if (match !== "argv" && match !== "raw") return `${where_}.match invalid`
+  if (match !== "argv" && match !== "expression" && match !== "raw") return `${where_}.match invalid`
   // legal tuple combinations (02 §2.7): exactly one classification arm
   const tupleOk =
     (classification === "static" && match === "argv") ||
+    (classification === "parameter" && match === "expression") ||
     ((classification === "opaque" || classification === "invalid") && match === "raw" && raw.verdict !== "allow")
   if (!tupleOk) return `${where_} has an impossible classification/match/verdict combination`
   let ruleId: string | undefined
@@ -255,18 +273,19 @@ function parseCommand(raw: unknown, position: number): V2CommandVerdict | string
     ruleId = raw.ruleId
   }
   if (raw.verdict === "deny" && ruleId === undefined) return `${where_} deny without ruleId`
-  let facts: V2Diagnostics | undefined
+  let facts: V3Diagnostics | undefined
   if (raw.facts !== undefined) {
     const parsed = parseDiagnostics(raw.facts, where_)
     if (typeof parsed === "string") return parsed
     facts = parsed
   }
+  if (classification === "parameter" && facts === undefined) return `${where_} parameter evidence requires diagnostics`
   return { index, verdict: raw.verdict, ruleId, classification, match, facts }
 }
 
 // ── Semantic invariants against the expected letter (02 §2.8) ───────────────
 
-function semanticErrors(result: V2Result, letter: Letter): string[] {
+function semanticErrors(result: V3Result, letter: Letter): string[] {
   const errors: string[] = []
   // The expected letter context is validated before any result-command
   // comparison (02 §2.8): contiguous positional indexes 0..N-1 equal to their
@@ -316,7 +335,7 @@ function semanticErrors(result: V2Result, letter: Letter): string[] {
   return errors
 }
 
-function coherenceErrors(command: V2CommandVerdict, facts: V2Diagnostics, position: number): string[] {
+function coherenceErrors(command: V3CommandVerdict, facts: V3Diagnostics, position: number): string[] {
   const errors: string[] = []
   if (!isSortedUnique(facts.reasons)) {
     errors.push(`commands[${position}].facts.reasons must be sorted and unique`)
@@ -324,8 +343,12 @@ function coherenceErrors(command: V2CommandVerdict, facts: V2Diagnostics, positi
   const reasons = facts.reasons
   if (facts.evidence === "complete") {
     if (!reasons.includes("complete")) errors.push(`commands[${position}].facts complete evidence requires the complete anchor`)
-    if (reasons.some((r) => r === "opaque-expansion" || r === "allow-evidence-not-complete" || isInvalidCause(r))) {
+    if (reasons.some((r) => r === "parameter-expansion" || r === "opaque-expansion" || r === "allow-evidence-not-complete" || isInvalidCause(r))) {
       errors.push(`commands[${position}].facts complete evidence carries incompatible reasons`)
+    }
+  } else if (facts.evidence === "parameter") {
+    if (!reasons.includes("parameter-expansion") || reasons.some((r) => r === "opaque-expansion" || r === "allow-evidence-not-complete" || isInvalidCause(r))) {
+      errors.push(`commands[${position}].facts parameter evidence requires a coherent parameter-expansion anchor`)
     }
   } else if (facts.evidence === "opaque") {
     if (!reasons.includes("opaque-expansion")) errors.push(`commands[${position}].facts opaque evidence requires the opaque-expansion anchor`)
@@ -333,22 +356,30 @@ function coherenceErrors(command: V2CommandVerdict, facts: V2Diagnostics, positi
   } else if (!reasons.some(isInvalidCause)) {
     errors.push(`commands[${position}].facts invalid evidence requires an invalid-cause reason`)
   }
-  const expectedEvidence: V2Evidence =
-    command.classification === "static" ? "complete" : (command.classification as V2Evidence)
+  const expectedEvidence: V3Evidence =
+    command.classification === "static" ? "complete" : (command.classification as V3Evidence)
   if (facts.evidence !== expectedEvidence) {
     errors.push(`commands[${position}].facts.evidence does not match the classification`)
+  }
+  if (command.verdict === "allow" && reasons.includes("predicate-unknown")) {
+    errors.push(`commands[${position}] unknown predicate cannot allow`)
   }
   return errors
 }
 
 function fullDiagnosticsErrors(
-  command: V2CommandVerdict,
-  facts: V2FullDiagnostics,
+  command: V3CommandVerdict,
+  facts: V3FullDiagnostics,
   position: number,
 ): string[] {
   const errors: string[] = []
   const matched = new Set(facts.matched)
   const qualified = new Set(facts.qualified)
+  if (facts.reasons.includes("predicate-unknown") !== (facts.uncertain.length > 0) ||
+      !isSortedUnique(facts.uncertain.map((entry) => entry.ruleId)) ||
+      facts.uncertain.some((entry) => !isSortedUnique(entry.predicates))) {
+    errors.push(`commands[${position}].facts uncertainty attribution is incoherent`)
+  }
   const votes = facts.votes.map((v) => {
     const [action, ruleId] = [v.slice(0, v.indexOf(":")), v.slice(v.indexOf(":") + 1)]
     return { action: action as Verdict, ruleId }
@@ -361,6 +392,9 @@ function fullDiagnosticsErrors(
     }
     if (!matched.has(entry.ruleId)) {
       errors.push(`commands[${position}].facts.rejected[${entryPosition}] rule is not matched`)
+    }
+    if (entry.reasons.some((reason) => !facts.reasons.includes(reason))) {
+      errors.push(`commands[${position}].facts.rejected[${entryPosition}].reasons must appear in facts.reasons`)
     }
   })
   const rejectedIds = facts.rejected.map((r) => r.ruleId)
@@ -387,8 +421,6 @@ function fullDiagnosticsErrors(
     errors.push(`commands[${position}] verdict is less restrictive than an emitted vote`)
   }
   if (
-    command.classification === "static" &&
-    command.match === "argv" &&
     command.verdict === "allow" &&
     !votes.some((v) => v.action === "allow")
   ) {
@@ -414,9 +446,9 @@ function fullDiagnosticsErrors(
 
 /**
  * Parse and validate one checker stdout payload against the expected letter.
- * Accepts only the exact v2 envelope; every deviation is a checker anomaly.
+  * Accepts only the exact v3 envelope; every deviation is a checker anomaly.
  */
-export function parseV2Envelope(letter: Letter, raw: string): ParseOutcome {
+export function parseV3Envelope(letter: Letter, raw: string): ParseOutcome {
   // 64 KiB pre-parse cap (02 §2.7): oversize output never reaches JSON.parse
   if (Buffer.byteLength(raw, "utf8") > MAX_VERDICT_BYTES) {
     return { ok: false, reason: "verdict exceeds the 64 KiB output bound" }
@@ -434,8 +466,8 @@ export function parseV2Envelope(letter: Letter, raw: string): ParseOutcome {
   if (!exactKeys(value, ["protocol", "result"])) {
     return { ok: false, reason: "verdict root must carry exactly protocol and result" }
   }
-  if (value.protocol !== V2_PROTOCOL) {
-    return { ok: false, reason: `verdict protocol must be exactly ${V2_PROTOCOL}` }
+  if (value.protocol !== V3_PROTOCOL) {
+    return { ok: false, reason: `verdict protocol must be exactly ${V3_PROTOCOL}` }
   }
   const result = value.result
   if (!isObject(result)) return { ok: false, reason: "verdict.result is not an object" }
@@ -468,19 +500,19 @@ export function parseV2Envelope(letter: Letter, raw: string): ParseOutcome {
   if (!Array.isArray(result.commands) || result.commands.length < 1 || result.commands.length > 128) {
     return { ok: false, reason: "verdict.result.commands invalid" }
   }
-  const commands: V2CommandVerdict[] = []
+  const commands: V3CommandVerdict[] = []
   for (const [position, rawCommand] of result.commands.entries()) {
     const command = parseCommand(rawCommand, position)
     if (typeof command === "string") return { ok: false, reason: command }
     commands.push(command)
   }
-  const v2Result: V2Result = {
+  const v3Result: V3Result = {
     invocationId: result.invocationId,
     verdict: result.verdict,
     ...(message !== undefined ? { message } : {}),
     commands,
   }
-  const semantic = semanticErrors(v2Result, letter)
+  const semantic = semanticErrors(v3Result, letter)
   if (semantic.length > 0) return { ok: false, reason: `verdict failed semantic validation: ${semantic[0]}` }
-  return { ok: true, value: v2Result }
+  return { ok: true, value: v3Result }
 }

@@ -47,6 +47,28 @@ OpenCode server ── permission.asked ── shim ── spawn shell-warden (l
 - Hook-owned state: allow-only cache (`cache.ttlMs`) and the reject budget per rule
   per session (`rejectBudget`) — exhaustion hands the ask to the human.
 
+## Active response contract
+
+The hook accepts only `shell-warden.verdict.v3`; the letter remains version 1.
+Upgrade it together with the configuration-v3 checker. Retired v1/v2 responses and
+mixed installations fail through `onCheckerError`, with no fallback validator.
+The checker owns parameter permissions and three-valued policy evaluation; the
+hook only validates and applies its result. Unknown restrictive predicates remain
+ask, not an automatic allow or a fabricated deny vote.
+
+Contract: https://github.com/agent-guardrails/docs/blob/main/spec/shell-warden/12-contextual-parameters.md
+
+Tests: `npm test` and `npm run typecheck`. Set `SHELL_WARDEN_TEST_BINARY` to an
+absolute path to the paired v3 binary to additionally run the real-checker
+`permission.asked` round trip. Its controlled permission-event harness verifies
+reply/silence without executing shell letters; it is not a deployment smoke test.
+
+CI pins the merged [canonical contract](https://github.com/agent-guardrails/docs/commit/cf253a11108afdafcd107bc324951f173b200e59)
+and [paired checker](https://github.com/agent-guardrails/shell-warden/commit/72c853c426102940cdbf9e0b2f202deaf8272a1c).
+The 62-vector mirror is byte-identical to that contract. Full rejected coverage
+reasons must appear in the aggregate reasons; neither complete nor parameter
+evidence may carry `allow-evidence-not-complete`, including after truncation.
+
 All options, defaults and clamps: `04-shim-config.md` in the spec repo. Unknown keys
 are ignored with a warning; only a broken `checker.command` / `sha256` /
 `onCheckerError: "allow"` disables the plugin at load — the fail-closed posture

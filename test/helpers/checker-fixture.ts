@@ -11,7 +11,7 @@ export const letter: Letter = {
   commands: [{ index: 0, raw: "git status", cwd: "" }],
 }
 
-export const V2_PROTOCOL = "shell-warden.verdict.v2"
+export const V3_PROTOCOL = "shell-warden.verdict.v3"
 
 export const command = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   index: 0,
@@ -20,6 +20,7 @@ export const command = (over: Record<string, unknown> = {}): Record<string, unkn
   classification: "static",
   match: "argv",
   facts: {
+    uncertain: [],
     evidence: "complete",
     reasons: ["complete"],
     selectedProfiles: ["git"],
@@ -33,7 +34,7 @@ export const command = (over: Record<string, unknown> = {}): Record<string, unkn
 
 export const verdictBody = (over: Record<string, unknown> = {}, commandOver: Record<string, unknown> = {}): string =>
   JSON.stringify({
-    protocol: V2_PROTOCOL,
+    protocol: V3_PROTOCOL,
     result: { invocationId: "msg:call", verdict: "allow", commands: [command(commandOver)], ...over },
   })
 
