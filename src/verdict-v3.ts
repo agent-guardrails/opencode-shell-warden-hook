@@ -347,7 +347,7 @@ function coherenceErrors(command: V3CommandVerdict, facts: V3Diagnostics, positi
       errors.push(`commands[${position}].facts complete evidence carries incompatible reasons`)
     }
   } else if (facts.evidence === "parameter") {
-    if (!reasons.includes("parameter-expansion") || reasons.some((r) => r === "opaque-expansion" || isInvalidCause(r))) {
+    if (!reasons.includes("parameter-expansion") || reasons.some((r) => r === "opaque-expansion" || r === "allow-evidence-not-complete" || isInvalidCause(r))) {
       errors.push(`commands[${position}].facts parameter evidence requires a coherent parameter-expansion anchor`)
     }
   } else if (facts.evidence === "opaque") {
@@ -392,6 +392,9 @@ function fullDiagnosticsErrors(
     }
     if (!matched.has(entry.ruleId)) {
       errors.push(`commands[${position}].facts.rejected[${entryPosition}] rule is not matched`)
+    }
+    if (entry.reasons.some((reason) => !facts.reasons.includes(reason))) {
+      errors.push(`commands[${position}].facts.rejected[${entryPosition}].reasons must appear in facts.reasons`)
     }
   })
   const rejectedIds = facts.rejected.map((r) => r.ruleId)

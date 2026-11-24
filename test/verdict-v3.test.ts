@@ -3,8 +3,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
-import { fileURLToPath } from "node:url"
+import { readFileSync, readdirSync } from "node:fs"
 import { parseV3Envelope, V3_PROTOCOL } from "../src/verdict-v3.ts"
 import type { Letter } from "../src/types.ts"
 import { MAX_VERDICT_BYTES } from "../src/types.ts"
@@ -33,22 +32,30 @@ function letterFor(vector: Vector): Letter {
   }
 }
 
-test("every shared v3 vector is consumed without a version fallback", () => {
+test("the v3 mirror contains exactly the manifest's vectors", () => {
+  const paths = manifest().map((vector) => vector.path)
+  assert.equal(new Set(paths).size, paths.length, "manifest paths must be unique")
+  assert.deepEqual(readdirSync(FIXTURES).sort(), ["invalid", "manifest.json", "valid"])
+  const files = ["invalid", "valid"].flatMap((kind) =>
+    readdirSync(new URL(`${kind}/`, FIXTURES)).map((name) => `${kind}/${name}`))
+  assert.deepEqual(files.sort(), paths.sort(), "no missing or unlisted vectors")
+})
+
+test("every shared v3 vector is consumed without a version fallback", async (t) => {
   const vectors = manifest()
-  assert.ok(vectors.length >= 50)
-  let consumed = 0
+  assert.equal(vectors.length, 62)
   for (const vector of vectors) {
-    consumed += 1
-    const text = readFileSync(new URL(vector.path, FIXTURES), "utf8")
-    const outcome = parseV3Envelope(letterFor(vector), text)
-    if (vector.valid) {
-      assert.equal(outcome.ok, true, `${vector.path} must validate: ${JSON.stringify(outcome)}`)
-      if (outcome.ok) assert.equal(outcome.value.invocationId, vector.expectedInvocationId)
-    } else {
-      assert.equal(outcome.ok, false, `${vector.path} must fail closed`)
-    }
+    await t.test(vector.path, () => {
+      const text = readFileSync(new URL(vector.path, FIXTURES), "utf8")
+      const outcome = parseV3Envelope(letterFor(vector), text)
+      if (vector.valid) {
+        assert.equal(outcome.ok, true, `${vector.path} must validate: ${JSON.stringify(outcome)}`)
+        if (outcome.ok) assert.equal(outcome.value.invocationId, vector.expectedInvocationId)
+      } else {
+        assert.equal(outcome.ok, false, `${vector.path} must fail closed`)
+      }
+    })
   }
-  assert.equal(consumed, vectors.length)
 })
 
 // ── Hook-specific anomaly requirements ──────────────────────────────────────
@@ -88,6 +95,73 @@ const v3Body = (over: Record<string, unknown> = {}): string =>
       ...over,
     },
   })
+
+// A supported evidence state cannot carry this cause at either diagnostic level,
+// even for ask/deny. Other coverage failures do not veto a qualified allow.
+test("supported evidence excludes allow-evidence-not-complete in full and truncated facts", () => {
+  for (const classification of ["static", "parameter"] as const) {
+    for (const verdict of ["allow", "ask", "deny"] as const) {
+      for (const truncated of [false, true]) {
+        const evidence = classification === "static" ? "complete" : "parameter"
+        const anchor = classification === "static" ? "complete" : "parameter-expansion"
+        const facts = {
+          ...v3Command.facts, evidence, reasons: [anchor],
+          qualified: verdict === "allow" ? ["hook/allow"] : [],
+          votes: [`${verdict}:hook/allow`],
+        }
+        const envelope = (reasons: string[]) => v3Body({
+          verdict, ...(verdict === "deny" ? { message: "Denied." } : {}),
+          commands: [{
+            ...v3Command, classification, verdict,
+            match: classification === "static" ? "argv" : "expression",
+            facts: truncated
+              ? { evidence, reasons, diagnostics: "truncated-after-decision" }
+              : { ...facts, reasons },
+          }],
+        })
+        const label = `${classification}/${verdict}/${truncated ? "truncated" : "full"}`
+        assert.equal(parseV3Envelope(baseLetter, envelope([anchor])).ok, true, label)
+        assert.equal(parseV3Envelope(baseLetter,
+          envelope(["allow-evidence-not-complete", anchor])).ok, false, label)
+      }
+    }
+  }
+})
+
+test("every rejected coverage reason must be aggregated for every evidence state", () => {
+  const coverageReasons = [
+    "allow-coverage-missing", "required-option-missing", "option-not-repeatable",
+    "option-not-allowed", "option-value-uncovered", "option-value-position-uncovered",
+    "remainder-uncovered", "redirect-policy-uncovered", "allow-evidence-not-complete",
+  ]
+  for (const evidence of ["complete", "parameter", "opaque", "invalid"] as const) {
+    const anchor = {
+      complete: "complete", parameter: "parameter-expansion",
+      opaque: "opaque-expansion", invalid: "unsupported-syntax",
+    }[evidence]
+    for (const reason of coverageReasons) {
+      const envelope = (aggregate: boolean) => v3Body({
+        verdict: "ask",
+        commands: [{
+          index: 0, verdict: "ask",
+          classification: evidence === "complete" ? "static" : evidence,
+          match: evidence === "complete" ? "argv" : evidence === "parameter" ? "expression" : "raw",
+          facts: {
+            ...v3Command.facts, evidence,
+            reasons: aggregate ? [anchor, reason].sort() : [anchor],
+            qualified: [], votes: [],
+            rejected: [{ ruleId: "hook/allow", reasons: [reason] }],
+          },
+        }],
+      })
+      const label = `${evidence}/${reason}`
+      assert.equal(parseV3Envelope(baseLetter, envelope(false)).ok, false, label)
+      const compatible = reason !== "allow-evidence-not-complete" ||
+        evidence === "opaque" || evidence === "invalid"
+      assert.equal(parseV3Envelope(baseLetter, envelope(true)).ok, compatible, label)
+    }
+  }
+})
 
 test("flat v1 response (even exact-valid) is rejected without fallback", () => {
   const flatV1 = JSON.stringify({
