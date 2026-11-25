@@ -7,7 +7,7 @@ no server, no long-lived process; the checker is spawned fresh on every check).
 ## Install
 
 ```sh
-npm install @agent-guardrails/opencode-shell-warden-hook
+npm install @agent-guardrails/opencode-shell-warden-hook@0.4.0
 ```
 
 `opencode.jsonc` (options per `docs/spec/shell-warden/04-shim-config.md` v2.0):
@@ -49,6 +49,13 @@ OpenCode server ── permission.asked ── shim ── spawn shell-warden (l
 
 ## Active response contract
 
+Version 0.4.0 pairs with
+[shell-warden 0.6.0](https://github.com/agent-guardrails/shell-warden/releases/tag/v0.6.0).
+Upgrade both components and migrate the checker policy to configuration v3
+before activation. Keep the native OpenCode shell permission at `ask`; the hook
+does not replace native denials. See [release notes](CHANGELOG.md) for migration
+details and open follow-up work.
+
 The hook accepts only `shell-warden.verdict.v3`; the letter remains version 1.
 Upgrade it together with the configuration-v3 checker. Retired v1/v2 responses and
 mixed installations fail through `onCheckerError`, with no fallback validator.
@@ -63,8 +70,8 @@ absolute path to the paired v3 binary to additionally run the real-checker
 `permission.asked` round trip. Its controlled permission-event harness verifies
 reply/silence without executing shell letters; it is not a deployment smoke test.
 
-CI pins the merged [canonical contract](https://github.com/agent-guardrails/docs/commit/cf253a11108afdafcd107bc324951f173b200e59)
-and [paired checker](https://github.com/agent-guardrails/shell-warden/commit/72c853c426102940cdbf9e0b2f202deaf8272a1c).
+CI pins the merged [canonical contract](https://github.com/agent-guardrails/docs/commit/f200d94c7db3a3f41839d5bd29dc16bbb7399645)
+and [paired checker](https://github.com/agent-guardrails/shell-warden/commit/9a87870193c21b5f92ab00c205280c5917623824).
 The 62-vector mirror is byte-identical to that contract. Full rejected coverage
 reasons must appear in the aggregate reasons; neither complete nor parameter
 evidence may carry `allow-evidence-not-complete`, including after truncation.
