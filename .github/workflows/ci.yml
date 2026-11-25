@@ -20,14 +20,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: agent-guardrails/shell-warden
-          ref: 72c853c426102940cdbf9e0b2f202deaf8272a1c
+          ref: 9a87870193c21b5f92ab00c205280c5917623824
           path: paired-checker
           persist-credentials: false
       - name: Checkout canonical v3 contract
         uses: actions/checkout@v4
         with:
           repository: agent-guardrails/docs
-          ref: cf253a11108afdafcd107bc324951f173b200e59
+          ref: f200d94c7db3a3f41839d5bd29dc16bbb7399645
           path: contract-docs
           persist-credentials: false
       - name: Verify canonical verdict mirror
