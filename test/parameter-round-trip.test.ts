@@ -34,14 +34,48 @@ test("parameter permissions complete a real-checker hook round trip", {
         match: { paths: { any: [{ coordinate: { argument: { index: 0, remainder: true } }, within: "/secret" }] } },
       }] : [])],
     })
+    // https://github.com/agent-guardrails/opencode-shell-warden-hook/issues/34
+    const optionProfile = (name: string, granted: boolean, restrictive: boolean) => ({
+      id: name, executables: [name], analyzer: "generic-v1",
+      options: { config: { aliases: ["--config", "-c"], arity: 1, inline: true } },
+      rules: [{
+        id: "allow-option", action: "allow",
+        expansions: granted ? { optionValues: ["HOME"] } : { arguments: ["HOME"] },
+        match: {
+          arguments: { exact: ["list"] },
+          options: { allowed: [{
+            option: "config", required: true, repeatable: false, values: { each: { any: true } },
+          }] },
+          environment: { none: true }, paths: { none: true },
+          facts: { none: true }, nestedParts: { none: true },
+        },
+      }, ...(restrictive ? [{
+        id: "secret-option", action: "deny", message: "Restricted option.",
+        match: { options: { values: { config: { oneOf: ["/secret"] } } } },
+      }] : [])],
+    })
     const configPath = join(temporary, "policy.json")
     writeFileSync(configPath, JSON.stringify({
       version: 3, defaults: { action: "ask", redirectPolicy: "none" },
       redirectPolicies: { none: { redirects: { none: true }, paths: { none: true } } },
-      profiles: [profile("ls", false), profile("cat", true)],
+      profiles: [
+        profile("ls", false), profile("cat", true),
+        optionProfile("example-tool", true, false),
+        optionProfile("ungranted-tool", false, false),
+        optionProfile("restricted-tool", true, true),
+      ],
     }))
     const commands = [
       'ls -- "$HOME"', 'ls "$HOME"', 'cat -- "$HOME"', "cat -- /public", "cat -- /secret",
+      'example-tool -c "$HOME/config" list',
+      'example-tool --config="${HOME}/config" list',
+      "example-tool --config /public list",
+      'ungranted-tool --config "$HOME/config" list',
+      'example-tool -c "${HOME:-/tmp}/config" list',
+      'restricted-tool --config="$HOME/config" list',
+      "restricted-tool -c /public list",
+      "restricted-tool --config /secret list",
+      "ungranted-tool -c /public list",
     ]
     const replies: Array<{ requestID: string; decision: string; message?: string }> = []
     let markCompleted!: () => void
@@ -77,8 +111,15 @@ test("parameter permissions complete a real-checker hook round trip", {
       { requestID: "request-0", decision: "once" },
       { requestID: "request-3", decision: "once" },
       { requestID: "request-4", decision: "reject" },
+      { requestID: "request-5", decision: "once" },
+      { requestID: "request-6", decision: "once" },
+      { requestID: "request-7", decision: "once" },
+      { requestID: "request-11", decision: "once" },
+      { requestID: "request-12", decision: "reject" },
+      { requestID: "request-13", decision: "once" },
     ])
     assert.equal(replies[2]?.message, "Restricted path.")
+    assert.equal(replies[7]?.message, "Restricted option.")
   } finally {
     teardown?.()
     rmSync(temporary, { recursive: true, force: true })
